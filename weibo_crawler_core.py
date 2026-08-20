@@ -54,10 +54,20 @@ def ensure_logger(log_level=logging.INFO):
     return logger
 
 
+def app_dir():
+    """获取应用程序所在目录
+
+    - 源码运行: 脚本所在目录
+    - PyInstaller 打包的 exe: exe 所在目录(而非临时解压目录 _MEIPASS)
+    """
+    if getattr(sys, "frozen", False):  # PyInstaller 打包环境
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.abspath(__file__))
+
+
 def resource_path(*parts):
-    """获取资源文件路径(与脚本同目录,保证从任意 cwd 运行都能找到)"""
-    base = os.path.dirname(os.path.abspath(__file__))
-    return os.path.join(base, *parts)
+    """获取资源文件路径(与程序同目录,保证从任意 cwd 运行都能找到)"""
+    return os.path.join(app_dir(), *parts)
 
 
 # ---------------------------------------------------------------------------

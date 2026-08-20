@@ -33,13 +33,13 @@ from datetime import datetime
 
 from weibo_crawler_core import (
     ensure_logger, ClassNameManager, WeiboPCCrawler, run_task,
-    resource_path,
+    resource_path, app_dir,
 )
 
 logger = logging.getLogger('weibo_crawler')
 
-# 默认使用项目目录下的 EdgeUserData(登录状态保存在本地,便于迁移与分享)
-DEFAULT_USER_DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "EdgeUserData")
+# 默认使用程序目录下的 EdgeUserData(登录状态保存在本地,便于迁移与分享)
+DEFAULT_USER_DATA_DIR = os.path.join(app_dir(), "EdgeUserData")
 
 
 def parse_args():

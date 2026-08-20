@@ -23,7 +23,7 @@ from datetime import datetime
 from tkinter import messagebox, scrolledtext, ttk
 
 from weibo_crawler_core import (
-    ensure_logger, ClassNameManager, run_task, resource_path,
+    ensure_logger, ClassNameManager, run_task, resource_path, app_dir,
 )
 
 # Windows 下隐藏后台控制台窗口(用 python.exe 启动时仍会弹出 cmd 黑窗口,这里将其隐藏)
@@ -38,8 +38,8 @@ if sys.platform == "win32":
 
 logger = logging.getLogger('weibo_crawler')
 
-# 默认使用项目目录下的 EdgeUserData(登录状态保存在本地,便于迁移与分享)
-DEFAULT_USER_DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "EdgeUserData")
+# 默认使用程序目录下的 EdgeUserData(登录状态保存在本地,便于迁移与分享)
+DEFAULT_USER_DATA_DIR = os.path.join(app_dir(), "EdgeUserData")
 
 CLASS_KEY_NAMES = {
     "card": "微博卡片类名(div)",
