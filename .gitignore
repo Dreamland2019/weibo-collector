@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+
+# 个人数据(爬取结果与登录状态,不应上传)
+DataPC/
+Data/
+EdgeUserData/
+debug_pages/
+debug_cards/
+debug_cards_js/
+processed_files.log
+
+# 临时与日志
+*.log
+*.tmp
+*.zip
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# 系统
+Thumbs.db
+Desktop.ini
+.DS_Store
