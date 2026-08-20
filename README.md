@@ -19,7 +19,7 @@
 
 ### 方式一:直接下载 exe(推荐,无需安装 Python)
 
-到右侧 **Releases** 页面下载最新版的 `weibo-md-exporter-GUI.exe`(图形界面)或 `weibo-md-exporter-CLI.exe`(命令行),**双击即可运行**,无需安装 Python 和任何依赖。
+到右侧 **Releases** 页面下载最新版的 `weibo-md-exporter-GUI.exe`(图形界面)或 `weibo-md-exporter-CLI.exe`(命令行),**双击即可运行**,无需安装 Python ，理论上只需要电脑里有edge浏览器。
 
 > 注意:exe 版运行时会在**自身所在文件夹**下自动创建 `EdgeUserData`(登录状态)和 `DataPC`(爬取结果),请放在有写权限的文件夹中。
 
