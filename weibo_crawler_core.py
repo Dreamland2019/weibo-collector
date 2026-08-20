@@ -441,11 +441,13 @@ class WeiboPCCrawler:
     """
 
     def __init__(self, headless=False, user_data_dir=None,
-                 class_manager=None, wait_callback=None):
+                 class_manager=None, wait_callback=None, manual_callback=None):
         self.user_data_dir = user_data_dir
         self.headless = headless
-        self.classes = class_manager or ClassNameManager(manual_callback=wait_callback)
-        # wait_callback: 需要用户操作(如手动登录后回车)时调用,CLI 默认 input
+        # manual_callback: 手动输入类名的回调,签名 (key, current) -> str
+        self.manual_callback = manual_callback
+        self.classes = class_manager or ClassNameManager(manual_callback=manual_callback)
+        # wait_callback: 等待用户操作(如手动登录后继续)的回调,签名 (message) -> None
         self.wait_callback = wait_callback
         self.driver = self.setup_driver(headless)
         self.wait = WebDriverWait(self.driver, 10)
@@ -1196,7 +1198,7 @@ def run_task(user_id, user_name, start_date, end_date,
              headless=False, user_data_dir=None, max_count=500,
              keyword="", is_ori=1, is_forward=0, is_text=1, is_pic=1,
              is_video=1, is_music=1, manual_callback=None,
-             progress_callback=None, data_root=None,
+             wait_callback=None, progress_callback=None, data_root=None,
              keep_browser_open=False, skip_export=False):
     """一键爬取任务:收集指定时间范围的微博ID并导出 Markdown
 
@@ -1205,7 +1207,8 @@ def run_task(user_id, user_name, start_date, end_date,
       start_date / end_date  时间范围(YYYY-MM-DD,含两端)
       headless               无头模式
       user_data_dir          Edge 用户数据目录(复用登录态)
-      manual_callback        手动输入类名/确认操作的回调
+      manual_callback        手动输入类名的回调,签名 (key, current) -> str
+      wait_callback          等待用户操作的回调(如手动登录后继续),签名 (message) -> None
       progress_callback      进度回调(用于 GUI 显示)
       data_root              数据输出根目录;None 时默认程序目录下的 DataPC
       keep_browser_open      完成后是否保留浏览器窗口
@@ -1218,7 +1221,8 @@ def run_task(user_id, user_name, start_date, end_date,
     if not data_root:
         data_root = os.path.join(app_dir(), "DataPC")
     crawler = WeiboPCCrawler(headless=headless, user_data_dir=user_data_dir,
-                             wait_callback=manual_callback)
+                             wait_callback=wait_callback,
+                             manual_callback=manual_callback)
 
     # 日期 +1 天:抵消微博时间换算导致的实际搜索范围偏移(沿用原脚本经验)
     start_search = (datetime.strptime(start_date, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")

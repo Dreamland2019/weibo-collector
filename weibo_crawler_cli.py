@@ -159,6 +159,10 @@ def main():
     def manual_cb(key, current):
         return manual_callback_cli(key, current)
 
+    # 等待用户操作回调(如手动登录后继续)
+    def wait_cb(message):
+        input(f"{message}\n完成后按回车继续...")
+
     # 类名管理器(先应用命令行覆盖)
     cm = ClassNameManager(manual_callback=manual_cb)
     apply_class_overrides(args, cm)
@@ -174,6 +178,7 @@ def main():
         max_count=args.max_count,
         keyword=args.keyword,
         manual_callback=manual_cb,
+        wait_callback=wait_cb,
         data_root=args.data_root,
         keep_browser_open=args.keep_browser,
         skip_export=args.no_export,

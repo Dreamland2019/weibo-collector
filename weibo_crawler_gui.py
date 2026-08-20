@@ -84,6 +84,8 @@ class WeiboCrawlerGUI:
         self.log_queue = queue.Queue()
         self.manual_req_queue = queue.Queue()   # 后台线程 -> 主线程:请求手动输入类名
         self.manual_resp_queue = queue.Queue()  # 主线程 -> 后台线程:用户输入结果
+        self.wait_req_queue = queue.Queue()     # 后台线程 -> 主线程:请求用户完成操作
+        self.wait_resp_queue = queue.Queue()    # 主线程 -> 后台线程:用户已确认
         self.worker = None
         self.running = False
 
@@ -190,7 +192,7 @@ class WeiboCrawlerGUI:
         self.txt_log.configure(state="disabled")
 
     def _poll_queues(self):
-        """主线程周期性检查队列:日志刷新 / 手动输入类名请求"""
+        """主线程周期性检查队列:日志刷新 / 手动输入类名请求 / 等待确认请求"""
         try:
             while True:
                 msg = self.log_queue.get_nowait()
@@ -202,6 +204,13 @@ class WeiboCrawlerGUI:
             while True:
                 key = self.manual_req_queue.get_nowait()
                 self._show_manual_dialog(key)
+        except queue.Empty:
+            pass
+
+        try:
+            while True:
+                msg = self.wait_req_queue.get_nowait()
+                self._show_wait_dialog(msg)
         except queue.Empty:
             pass
 
@@ -256,6 +265,21 @@ class WeiboCrawlerGUI:
         except queue.Empty:
             return None
 
+    def wait_callback(self, message):
+        """后台线程调用:弹出提示对话框,等待用户完成操作(如手动登录)后继续"""
+        if not self.root.winfo_exists():
+            return
+        self.wait_req_queue.put(message)
+        try:
+            self.wait_resp_queue.get(timeout=1800)
+        except queue.Empty:
+            pass
+
+    def _show_wait_dialog(self, message):
+        """主线程弹出"请完成操作"对话框"""
+        messagebox.showinfo("请完成操作", message, parent=self.root)
+        self.wait_resp_queue.put(True)
+
     def _start(self):
         if self.running:
             return
@@ -300,6 +324,7 @@ class WeiboCrawlerGUI:
             "headless": self.var_headless.get(),
             "user_data_dir": self.var_userdata.get().strip() or None,
             "manual_callback": self.manual_callback,
+            "wait_callback": self.wait_callback,
             "data_root": None,
             "keep_browser_open": self.var_keep_browser.get(),
             "skip_export": self.var_skip_export.get(),
