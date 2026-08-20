@@ -6,6 +6,10 @@ on:
       - 'v*'
   workflow_dispatch:
 
+# 授予 GITHUB_TOKEN 写权限,允许创建 Release 并上传 exe
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: windows-latest
