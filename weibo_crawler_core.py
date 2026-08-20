@@ -66,7 +66,18 @@ def app_dir():
 
 
 def resource_path(*parts):
-    """获取资源文件路径(与程序同目录,保证从任意 cwd 运行都能找到)"""
+    """获取资源文件路径
+
+    - 源码运行: 脚本所在目录
+    - PyInstaller 打包: 优先从临时解压目录 _MEIPASS 读取内置资源(只读);
+      需要持久化的文件(如 class_names.json 保存)仍走 app_dir(exe 旁)
+    """
+    if getattr(sys, "frozen", False):
+        meipass = getattr(sys, "_MEIPASS", "")
+        if meipass:
+            bundled = os.path.join(meipass, *parts)
+            if os.path.exists(bundled):
+                return bundled
     return os.path.join(app_dir(), *parts)
 
 
@@ -118,7 +129,7 @@ class ClassNameManager:
             返回用户输入的类名(不含前缀),返回空串/None 表示用户放弃输入
         """
         self.logger = logger or logging.getLogger('weibo_crawler.classes')
-        self.config_path = config_path or resource_path(self.CONFIG_FILE)
+        self.config_path = config_path or os.path.join(app_dir(), self.CONFIG_FILE)
         self.manual_callback = manual_callback
         self.classes = dict(self.DEFAULT_CLASSES)
         self.load()
@@ -1185,7 +1196,7 @@ def run_task(user_id, user_name, start_date, end_date,
              headless=False, user_data_dir=None, max_count=500,
              keyword="", is_ori=1, is_forward=0, is_text=1, is_pic=1,
              is_video=1, is_music=1, manual_callback=None,
-             progress_callback=None, data_root="DataPC",
+             progress_callback=None, data_root=None,
              keep_browser_open=False, skip_export=False):
     """一键爬取任务:收集指定时间范围的微博ID并导出 Markdown
 
@@ -1196,7 +1207,7 @@ def run_task(user_id, user_name, start_date, end_date,
       user_data_dir          Edge 用户数据目录(复用登录态)
       manual_callback        手动输入类名/确认操作的回调
       progress_callback      进度回调(用于 GUI 显示)
-      data_root              数据输出根目录,默认 DataPC
+      data_root              数据输出根目录;None 时默认程序目录下的 DataPC
       keep_browser_open      完成后是否保留浏览器窗口
       skip_export            只收集ID,不导出Markdown
 
@@ -1204,6 +1215,8 @@ def run_task(user_id, user_name, start_date, end_date,
       {"username", "weibo_ids", "txt_file", "md_dir", "exported", "failed"}
     """
     ensure_logger()
+    if not data_root:
+        data_root = os.path.join(app_dir(), "DataPC")
     crawler = WeiboPCCrawler(headless=headless, user_data_dir=user_data_dir,
                              wait_callback=manual_callback)
 

@@ -60,7 +60,7 @@ def parse_args():
     parser.add_argument("--keyword", default="", help="搜索关键词,默认空")
     parser.add_argument("--no-export", action="store_true", help="只收集微博ID,不导出Markdown")
     parser.add_argument("--keep-browser", action="store_true", help="完成后保留浏览器窗口")
-    parser.add_argument("--data-root", default="DataPC", help="数据输出根目录,默认DataPC")
+    parser.add_argument("--data-root", default=None, help="数据输出根目录,默认程序目录下DataPC")
 
     # 类名覆盖参数(自动探测失败时手动指定)
     parser.add_argument("--card-class", dest="card_class", help="微博卡片类名(覆盖)")

@@ -300,7 +300,7 @@ class WeiboCrawlerGUI:
             "headless": self.var_headless.get(),
             "user_data_dir": self.var_userdata.get().strip() or None,
             "manual_callback": self.manual_callback,
-            "data_root": "DataPC",
+            "data_root": None,
             "keep_browser_open": self.var_keep_browser.get(),
             "skip_export": self.var_skip_export.get(),
         }
