@@ -585,8 +585,25 @@ class WeiboPCCrawler:
             return False
 
     def manual_login(self):
-        """手动登录微博,等待用户在浏览器中完成登录"""
+        """手动登录微博,等待用户在浏览器中完成登录
+
+        若当前为无头模式(headless),自动重启为有头模式,
+        否则用户看不到浏览器窗口无法扫码登录。
+        """
         logger.info("请手动登录微博...")
+
+        # 无头模式下无法显示登录界面,自动切换为有头模式
+        if self.headless:
+            logger.warning("当前为无头模式,无法显示浏览器供登录,自动重启为有头模式...")
+            try:
+                self.driver.quit()
+            except Exception:
+                pass
+            self.driver = self.setup_driver(headless=False)
+            self.wait = WebDriverWait(self.driver, 10)
+            self.headless = False
+            logger.info("已重启为有头模式,请在弹出的浏览器窗口中完成登录")
+
         self.driver.get("https://weibo.com/login.php")
         if self.wait_callback:
             self.wait_callback("请在浏览器中完成登录,然后点击「确定」继续...")
