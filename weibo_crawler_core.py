@@ -1270,7 +1270,7 @@ class WeiboPCCrawler:
 
     @staticmethod
     def _publish_month_dir(publish_time, output_dir):
-        """根据发布时间字符串解析 YYYY-MM 月份目录"""
+        """根据发布时间解析 年份年/月份 目录(如 2024年/10月)"""
         try:
             s = (publish_time or "").strip()
             # 支持 "26-4-7 21:58" / "2026-04-07" / "4月7日" 等格式
@@ -1279,10 +1279,10 @@ class WeiboPCCrawler:
                 year = int(m.group(1))
                 if year < 100:
                     year += 2000
-                return os.path.join(output_dir, f"{year:04d}-{int(m.group(2)):02d}")
+                return os.path.join(output_dir, f"{year}年", f"{int(m.group(2))}月")
             m2 = re.search(r"(\d{4})年(\d{1,2})月", s)
             if m2:
-                return os.path.join(output_dir, f"{int(m2.group(1)):04d}-{int(m2.group(2)):02d}")
+                return os.path.join(output_dir, f"{int(m2.group(1))}年", f"{int(m2.group(2))}月")
         except Exception:
             pass
         return output_dir
@@ -1501,10 +1501,13 @@ def run_task(user_id, user_name, start_date, end_date,
         if username and username != user_id:
             result["username"] = username
 
-        # 2. 保存 ID 到 txt(文件名沿用用户输入的原始日期)
+        # 2. 保存 ID 到 txt(新结构: 放入年份目录,如 2026年/)
+        #    文件名沿用用户输入的原始日期
         data_dir = os.path.join(data_root, f"{result['username']}_{user_id}")
-        os.makedirs(data_dir, exist_ok=True)
-        txt_file = os.path.join(data_dir, f"{result['username']}_{user_id}_{start_date}_{end_date}.txt")
+        start_year = start_date[:4]
+        year_dir = os.path.join(data_dir, f"{start_year}年")
+        os.makedirs(year_dir, exist_ok=True)
+        txt_file = os.path.join(year_dir, f"{result['username']}_{user_id}_{start_date}_{end_date}.txt")
         crawler.save_weibo_ids_to_file(weibo_ids, txt_file)
         result["weibo_ids"] = weibo_ids
         result["txt_file"] = txt_file
@@ -1512,12 +1515,10 @@ def run_task(user_id, user_name, start_date, end_date,
         if skip_export:
             return result
 
-        # 3. 导出(按 YYYY-MM 月份子文件夹保存,重跑时覆盖同名文件)
-        md_dir = os.path.join(data_dir, f"{result['username']}_{user_id}_{start_date}_{end_date}")
-        os.makedirs(md_dir, exist_ok=True)
-        result["md_dir"] = md_dir
+        # 3. 导出(新结构: 博主目录/年份/月份/文件,重跑时覆盖同名文件)
+        result["md_dir"] = data_dir
         ok_count, fail_count = crawler.export_markdowns(
-            weibo_ids, user_id, result["username"], md_dir,
+            weibo_ids, user_id, result["username"], data_dir,
             progress_callback=progress_callback, overwrite=True,
             month_subdirs=True,
             min_interval=min_interval, max_interval=max_interval,
