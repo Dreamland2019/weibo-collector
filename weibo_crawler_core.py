@@ -956,36 +956,37 @@ class WeiboPCCrawler:
                 self.driver.switch_to.window(self.driver.window_handles[0])
 
     def extract_images(self):
-        """提取微博正文中的图片 URL(详情页)
+        """提取微博正文配图的大图 URL(详情页)
 
-        微博 PC 端正文图片的稳定类名为 woo-picture-img;
-        兜底:全页查找 sinaimg 域名图片并过滤头像/图标/表情。
+        策略:
+          1. 只在正文卡片(div.{card_cls},如 _body_ecgcn_63)范围内查找,
+             避免抓到右侧用户卡片/推荐位等卡片外的图片
+          2. 只提取配图类名:woo-picture-img(首图)与 _focusImg_*(其余图),
+             过滤头像(woo-avatar-img)、VIP图标(woo-icon-vipimg)等
+          3. 缩略图标记(orj360/mw690 等)替换为 large,取大图
         """
         images = []
         try:
-            img_els = self.driver.find_elements(By.CSS_SELECTOR, "img")
+            card_cls = self.classes.get("card")
+            if not card_cls:
+                return images
+            cards = self.driver.find_elements(By.CSS_SELECTOR, f"div.{card_cls}")
+            if not cards:
+                return images
+            # 详情页通常只有一个正文卡片;若有多个,取内容最长的(真正的正文)
+            card = max(cards, key=lambda c: len(c.get_attribute("outerHTML") or ""))
+
+            img_els = card.find_elements(By.CSS_SELECTOR, "img")
             seen = set()
             for img in img_els:
                 src = img.get_attribute("src") or ""
                 cls = img.get_attribute("class") or ""
-                if not src:
+                if not src or src.startswith("data:"):
                     continue
-                # 优先匹配正文图片类名
-                if "woo-picture-img" in cls:
-                    url = self._clean_image_url(src)
-                    if url and url not in seen and len(seen) < 20:
-                        seen.add(url)
-                        images.append(url)
+                # 只匹配配图类名;跳过头像/图标/视频占位图
+                is_pic = ("woo-picture-img" in cls) or ("focusImg" in cls)
+                if not is_pic:
                     continue
-                # 兜底:按域名与特征过滤(排除头像/图标/表情)
-                if "sinaimg.cn" not in src:
-                    continue
-                if any(k in src for k in (
-                        "crop.", "avatar", "h5.sinaimg.cn/upload",
-                        "face.t.sinajs.cn", "simg.s.weibo.com")):
-                    continue
-                if src.startswith(("https://tva", "https://tvax")):
-                    continue  # 头像域名
                 url = self._clean_image_url(src)
                 if url and url not in seen and len(seen) < 20:
                     seen.add(url)
@@ -996,9 +997,12 @@ class WeiboPCCrawler:
 
     @staticmethod
     def _clean_image_url(src):
-        """清洗图片 URL:去掉缩略图尺寸与裁剪参数,取原图"""
-        url = re.sub(r"!\w+", "", src)          # 去掉 !thumb 等后缀
-        url = re.sub(r"/\d+x\d+/", "/", url)     # 去掉 /mw690/ 等尺寸段
+        """清洗图片 URL:去掉查询参数/尺寸后缀,缩略图标记替换为 large 大图"""
+        url = re.sub(r"\?.*$", "", src)          # 去掉 ?KID= 等查询参数
+        url = re.sub(r"!\w+", "", url)           # 去掉 !thumb 等后缀
+        # 缩略图标记 -> 大图: orj360/mw690/bmiddle/thumb150/square 等
+        url = re.sub(r"/(?:orj360|mw690|bmiddle|thumb150|square)/",
+                     "/large/", url)
         url = re.sub(r"#.*$", "", url)
         return url.strip()
 
