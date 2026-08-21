@@ -730,21 +730,34 @@ class WeiboPCCrawler:
             logger.error(f"获取用户名失败: {e}")
             return fallback_name or f"user_{user_id}"
 
-    def click_search_button(self):
-        """点击页面上的搜索按钮,确保高级搜索条件生效"""
-        try:
-            search_buttons = self.driver.find_elements(
-                By.XPATH, "//button[.//span[text()='搜索']]")
-            if search_buttons:
-                search_buttons[0].click()
-                logger.info("已点击搜索按钮")
-                time.sleep(3)
-                return True
-            logger.warning("找不到搜索按钮,直接使用 URL 参数")
-            return False
-        except Exception as e:
-            logger.warning(f"点击搜索按钮时出错: {e}")
-            return False
+    def click_search_button(self, wait_after=5):
+        """点击页面上的搜索按钮,确保高级搜索条件(时间/类型)生效
+
+        微博页面首次加载时 URL 参数可能未生效,点击"搜索"按钮后
+        页面才会只展示符合条件(如时间范围内)的微博。
+        支持多种按钮结构,并容忍文本两侧空白。
+        """
+        selectors = [
+            # 用户提供的结构: <span class="woo-button-content"> 搜索 </span>
+            "//button[.//span[normalize-space(text())='搜索']]",
+            "//button[.//span[contains(@class, 'woo-button-content') and "
+            "normalize-space(.)='搜索']]",
+            # 兜底: 任意含"搜索"文本的按钮
+            "//button[.//*[normalize-space(text())='搜索']]",
+            "//*[@role='button' and .//*[normalize-space(text())='搜索']]",
+        ]
+        for selector in selectors:
+            try:
+                buttons = self.driver.find_elements(By.XPATH, selector)
+                if buttons:
+                    buttons[0].click()
+                    logger.info("已点击搜索按钮,等待搜索结果刷新...")
+                    time.sleep(wait_after)
+                    return True
+            except Exception as e:
+                logger.warning(f"尝试选择器 {selector[:50]} 时出错: {e}")
+        logger.warning("找不到搜索按钮,直接使用 URL 参数(时间过滤可能未生效)")
+        return False
 
     def collect_weibo_ids(self, user_id, start_date=None, end_date=None,
                           max_count=500, keyword="", is_ori=1, is_forward=0,
@@ -767,6 +780,10 @@ class WeiboPCCrawler:
         logger.info(f"正在访问URL: {search_url}")
         self.driver.get(search_url)
         time.sleep(5)
+
+        # 关键: 点击页面上的"搜索"按钮,让时间/类型过滤条件真正生效。
+        # 微博页面首次加载时 URL 参数可能未应用,不点击会抓到范围外的微博。
+        self.click_search_button()
 
         # 解析类名(在列表页上自动探测);若失败,先刷新页面再重试一次
         # (避免懒加载导致页面暂无卡片而误判"该时间段没有微博")
