@@ -60,7 +60,23 @@ def parse_args():
     parser.add_argument("--keyword", default="", help="搜索关键词,默认空")
     parser.add_argument("--no-export", action="store_true", help="只收集微博ID,不导出Markdown")
     parser.add_argument("--keep-browser", action="store_true", help="完成后保留浏览器窗口")
-    parser.add_argument("--data-root", default=None, help="数据输出根目录,默认程序目录下DataPC")
+    parser.add_argument("--data-root", default="DataPC", help="数据输出根目录,默认DataPC")
+
+    # 路线图更新1: 爬取间隔可自定义
+    parser.add_argument("--min-interval", type=int, default=3,
+                        help="每条微博之间最小等待秒数,默认3(勿设置过短,避免风控)")
+    parser.add_argument("--max-interval", type=int, default=8,
+                        help="每条微博之间最大等待秒数,默认8")
+
+    # 路线图更新3: 是否下载图片/视频
+    parser.add_argument("--download-images", action="store_true",
+                        help="同时下载微博中的图片到本地")
+    parser.add_argument("--download-videos", action="store_true",
+                        help="同时下载微博中的视频到本地")
+
+    # 路线图更新4: 导出格式
+    parser.add_argument("--format", dest="export_format", default="md",
+                        choices=["md", "docx"], help="导出格式,默认md(支持docx)")
 
     # 类名覆盖参数(自动探测失败时手动指定)
     parser.add_argument("--card-class", dest="card_class", help="微博卡片类名(覆盖)")
@@ -182,6 +198,11 @@ def main():
         data_root=args.data_root,
         keep_browser_open=args.keep_browser,
         skip_export=args.no_export,
+        min_interval=args.min_interval,
+        max_interval=args.max_interval,
+        download_images=args.download_images,
+        download_videos=args.download_videos,
+        export_format=args.export_format,
     )
 
     # 结果输出

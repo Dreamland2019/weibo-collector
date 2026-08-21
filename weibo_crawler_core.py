@@ -486,7 +486,7 @@ class WeiboPCCrawler:
 
         self._cleanup_stale_locks()
 
-        # 方案1: Selenium Manager(内置,自动管理驱动,官方源 msedgedriver.microsoft.com)
+        # 方案1: Selenium Manager(内置,自动管理驱动)
         try:
             driver = webdriver.Edge(options=edge_options)
             driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
@@ -494,25 +494,12 @@ class WeiboPCCrawler:
         except Exception as e:
             logger.warning(f"使用 Selenium Manager 创建 Edge 驱动失败: {e}")
 
-        # 方案2: webdriver-manager(依次尝试国内镜像与官方源)
+        # 方案2: webdriver-manager
         try:
-            mirrors = [
-                "https://registry.npmmirror.com/-/binary/edgedriver",
-                "https://msedgedriver.microsoft.com",
-            ]
-            last_err = None
-            for mirror in mirrors:
-                try:
-                    service = EdgeService(
-                        EdgeChromiumDriverManager(url=mirror).install())
-                    driver = webdriver.Edge(service=service, options=edge_options)
-                    driver.execute_script(
-                        "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-                    return driver
-                except Exception as e:
-                    last_err = e
-                    logger.warning(f"使用镜像 {mirror} 下载驱动失败: {e}")
-            raise last_err
+            service = EdgeService(EdgeChromiumDriverManager().install())
+            driver = webdriver.Edge(service=service, options=edge_options)
+            driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+            return driver
         except Exception as e:
             logger.error(f"创建 Edge 驱动失败: {e}")
             return self.setup_driver_fallback(headless)
@@ -585,8 +572,25 @@ class WeiboPCCrawler:
             return False
 
     def manual_login(self):
-        """手动登录微博,等待用户在浏览器中完成登录"""
+        """手动登录微博,等待用户在浏览器中完成登录
+
+        若当前为无头模式(headless),自动重启为有头模式,
+        否则用户看不到浏览器窗口无法扫码登录。
+        """
         logger.info("请手动登录微博...")
+
+        # 无头模式下无法显示登录界面,自动切换为有头模式
+        if self.headless:
+            logger.warning("当前为无头模式,无法显示浏览器供登录,自动重启为有头模式...")
+            try:
+                self.driver.quit()
+            except Exception:
+                pass
+            self.driver = self.setup_driver(headless=False)
+            self.wait = WebDriverWait(self.driver, 10)
+            self.headless = False
+            logger.info("已重启为有头模式,请在弹出的浏览器窗口中完成登录")
+
         self.driver.get("https://weibo.com/login.php")
         if self.wait_callback:
             self.wait_callback("请在浏览器中完成登录,然后点击「确定」继续...")
@@ -909,6 +913,8 @@ class WeiboPCCrawler:
             topics = self.extract_topics()
             content = self.extract_content(content_cls)
             repost_count, comment_count, like_count = self.extract_stats()
+            images = self.extract_images()
+            videos = self.extract_videos()
             save_time = datetime.now().strftime("%y-%m-%d %H:%M")
 
             return {
@@ -919,6 +925,8 @@ class WeiboPCCrawler:
                 "repost_count": repost_count,
                 "comment_count": comment_count,
                 "like_count": like_count,
+                "images": images,
+                "videos": videos,
                 "save_time": save_time,
                 "weibo_id": weibo_id,
             }
@@ -929,6 +937,70 @@ class WeiboPCCrawler:
             if len(self.driver.window_handles) > 1:
                 self.driver.close()
                 self.driver.switch_to.window(self.driver.window_handles[0])
+
+    def extract_images(self):
+        """提取微博正文中的图片 URL(详情页)
+
+        微博 PC 端正文图片的稳定类名为 woo-picture-img;
+        兜底:全页查找 sinaimg 域名图片并过滤头像/图标/表情。
+        """
+        images = []
+        try:
+            img_els = self.driver.find_elements(By.CSS_SELECTOR, "img")
+            seen = set()
+            for img in img_els:
+                src = img.get_attribute("src") or ""
+                cls = img.get_attribute("class") or ""
+                if not src:
+                    continue
+                # 优先匹配正文图片类名
+                if "woo-picture-img" in cls:
+                    url = self._clean_image_url(src)
+                    if url and url not in seen and len(seen) < 20:
+                        seen.add(url)
+                        images.append(url)
+                    continue
+                # 兜底:按域名与特征过滤(排除头像/图标/表情)
+                if "sinaimg.cn" not in src:
+                    continue
+                if any(k in src for k in (
+                        "crop.", "avatar", "h5.sinaimg.cn/upload",
+                        "face.t.sinajs.cn", "simg.s.weibo.com")):
+                    continue
+                if src.startswith(("https://tva", "https://tvax")):
+                    continue  # 头像域名
+                url = self._clean_image_url(src)
+                if url and url not in seen and len(seen) < 20:
+                    seen.add(url)
+                    images.append(url)
+        except Exception as e:
+            logger.warning(f"提取图片失败: {e}")
+        return images
+
+    @staticmethod
+    def _clean_image_url(src):
+        """清洗图片 URL:去掉缩略图尺寸与裁剪参数,取原图"""
+        url = re.sub(r"!\w+", "", src)          # 去掉 !thumb 等后缀
+        url = re.sub(r"/\d+x\d+/", "/", url)     # 去掉 /mw690/ 等尺寸段
+        url = re.sub(r"#.*$", "", url)
+        return url.strip()
+
+    def extract_videos(self):
+        """提取微博正文中的视频 URL(详情页)"""
+        videos = []
+        try:
+            video_els = self.driver.find_elements(By.CSS_SELECTOR, "video source, video")
+            seen = set()
+            for v in video_els:
+                src = v.get_attribute("src") or ""
+                if not src:
+                    continue
+                if src and src not in seen and len(seen) < 10:
+                    seen.add(src)
+                    videos.append(src)
+        except Exception as e:
+            logger.warning(f"提取视频失败: {e}")
+        return videos
 
     def extract_publish_time(self):
         """提取发布时间"""
@@ -1077,11 +1149,17 @@ class WeiboPCCrawler:
 
     def export_markdowns(self, weibo_ids, user_id, user_name, base_dir,
                          min_interval=3, max_interval=8, progress_callback=None,
-                         overwrite=False):
-        """逐条抓取详情并导出 Markdown
+                         overwrite=False, month_subdirs=True,
+                         download_images=False, download_videos=False,
+                         export_format="md"):
+        """逐条抓取详情并导出(支持 md / docx 格式)
 
-        overwrite=True 时同名文件直接覆盖(重新抓取场景);
-        否则已存在则加序号避免覆盖。
+        参数:
+          min_interval / max_interval  每条微博之间的随机等待秒数范围
+          overwrite                    同名文件直接覆盖(重跑场景)
+          month_subdirs                按 YYYY-MM 月份子文件夹保存
+          download_images/videos       是否下载图片/视频到本地
+          export_format                "md" 或 "docx"
 
         返回 (成功数, 失败数)
         """
@@ -1101,24 +1179,67 @@ class WeiboPCCrawler:
                 logger.error(f"无法获取微博 {weibo_id} 的详情")
                 continue
 
-            md_content = self.generate_markdown(detail)
-
-            # 文件名: 用户名_日期_微博ID.md (日期来自发布时间)
+            # 文件名: 用户名_日期_微博ID.ext (日期来自发布时间)
             save_time = detail['publish_time']
             date_part = save_time.split()[0] if save_time and save_time != "未知时间" else "unknown"
-            output_filename = f"{user_name}_{date_part}_{weibo_id}.md"
-            output_path = os.path.join(output_dir, output_filename)
+            ext = ".docx" if export_format == "docx" else ".md"
+            output_filename = f"{user_name}_{date_part}_{weibo_id}{ext}"
+
+            # 按月保存: 根据发布时间归入 YYYY-MM 子文件夹
+            if month_subdirs:
+                month_dir = self._publish_month_dir(save_time, output_dir)
+            else:
+                month_dir = output_dir
+            os.makedirs(month_dir, exist_ok=True)
+            output_path = os.path.join(month_dir, output_filename)
 
             if not overwrite:
                 counter = 1
                 original = output_path
                 while os.path.exists(output_path):
-                    name, ext = os.path.splitext(original)
-                    output_path = f"{name}_{counter}{ext}"
+                    name, ext0 = os.path.splitext(original)
+                    output_path = f"{name}_{counter}{ext0}"
                     counter += 1
 
-            with open(output_path, 'w', encoding='utf-8') as f:
-                f.write(md_content)
+            # 下载图片/视频到本地(可选,先下载以便 md 引用本地文件)
+            local_images = []
+            if download_images and detail.get("images"):
+                local_images = self._download_media(
+                    detail["images"], month_dir, "images",
+                    detail.get("weibo_id", ""))
+            local_videos = []
+            if download_videos and detail.get("videos"):
+                local_videos = self._download_media(
+                    detail["videos"], month_dir, "videos",
+                    detail.get("weibo_id", ""))
+
+            # 生成内容并写入
+            try:
+                if export_format == "docx":
+                    self._write_docx(detail, output_path)
+                else:
+                    md_content = self.generate_markdown(detail)
+                    if detail.get("images"):
+                        md_content += "\n\n### 图片\n"
+                        for idx, img_url in enumerate(detail["images"], 1):
+                            if idx <= len(local_images) and local_images[idx - 1]:
+                                md_content += f"\n![图片{idx}]({local_images[idx - 1]})\n"
+                            else:
+                                md_content += f"\n![图片{idx}]({img_url})\n"
+                    if detail.get("videos"):
+                        md_content += "\n\n### 视频\n"
+                        for i2, v_url in enumerate(detail["videos"]):
+                            if i2 < len(local_videos) and local_videos[i2]:
+                                md_content += f"\n[视频]({local_videos[i2]})\n"
+                            else:
+                                md_content += f"\n[视频链接]({v_url})\n"
+                    with open(output_path, 'w', encoding='utf-8') as f:
+                        f.write(md_content)
+            except Exception as e:
+                logger.error(f"写入文件失败 {output_path}: {e}")
+                fail_count += 1
+                continue
+
             ok_count += 1
             logger.info(f"已保存: {os.path.basename(output_path)}")
 
@@ -1129,6 +1250,92 @@ class WeiboPCCrawler:
 
         logger.info(f"导出完成: 成功 {ok_count} 条, 失败 {fail_count} 条")
         return ok_count, fail_count
+
+    @staticmethod
+    def _publish_month_dir(publish_time, output_dir):
+        """根据发布时间字符串解析 YYYY-MM 月份目录"""
+        try:
+            s = (publish_time or "").strip()
+            # 支持 "26-4-7 21:58" / "2026-04-07" / "4月7日" 等格式
+            m = re.match(r"(\d{2,4})-(\d{1,2})-\d{1,2}", s)
+            if m:
+                year = int(m.group(1))
+                if year < 100:
+                    year += 2000
+                return os.path.join(output_dir, f"{year:04d}-{int(m.group(2)):02d}")
+            m2 = re.search(r"(\d{4})年(\d{1,2})月", s)
+            if m2:
+                return os.path.join(output_dir, f"{int(m2.group(1)):04d}-{int(m2.group(2)):02d}")
+        except Exception:
+            pass
+        return output_dir
+
+    @staticmethod
+    def _write_docx(detail, output_path):
+        """将详情导出为 docx 文件(使用 python-docx)"""
+        from docx import Document
+        from docx.shared import Pt
+
+        doc = Document()
+        doc.add_paragraph(f"URL：{detail['url']}")
+        doc.add_paragraph(f"发布时间：{detail['publish_time']}")
+        doc.add_paragraph(f"词条：{detail['topics']}")
+        doc.add_paragraph(f"正文字数：{len(detail['content'])}字符")
+        doc.add_paragraph("—" * 20)
+        doc.add_paragraph("正文：")
+        for line in detail['content'].splitlines():
+            doc.add_paragraph(line)
+        doc.add_paragraph("—" * 20)
+        doc.add_paragraph(f"转发数：{detail['repost_count']}")
+        doc.add_paragraph(f"评论数：{detail['comment_count']}")
+        doc.add_paragraph(f"点赞数：{detail['like_count']}")
+        doc.add_paragraph(f"保存时间：{detail['save_time']}")
+        doc.save(output_path)
+
+    @staticmethod
+    def _download_media(urls, base_dir, sub_dir, weibo_id):
+        """下载图片/视频到 base_dir/sub_dir 下(带微博 Referer 防盗链)
+
+        返回下载成功的本地相对路径列表(如 "images/xxx_1.jpg"),失败项为 None
+        """
+        try:
+            import requests
+        except ImportError:
+            logger.warning("未安装 requests,无法下载媒体文件")
+            return []
+        target = os.path.join(base_dir, sub_dir)
+        os.makedirs(target, exist_ok=True)
+        headers = {
+            "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                           "AppleWebKit/537.36 (KHTML, like Gecko) "
+                           "Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0"),
+            "Referer": "https://weibo.com/",
+        }
+        results = []
+        for idx, url in enumerate(urls, 1):
+            try:
+                ext = ".jpg"
+                for cand in (".png", ".gif", ".webp", ".mp4"):
+                    if cand in url.lower():
+                        ext = cand
+                        break
+                fname = f"{weibo_id}_{idx}{ext}"
+                fpath = os.path.join(target, fname)
+                if not os.path.exists(fpath):
+                    resp = requests.get(url, headers=headers, timeout=30)
+                    if resp.status_code == 200:
+                        with open(fpath, "wb") as f:
+                            f.write(resp.content)
+                        logger.info(f"已下载媒体: {os.path.join(sub_dir, fname)}")
+                    else:
+                        logger.warning(f"下载媒体失败 HTTP {resp.status_code}: {url}")
+                        results.append(None)
+                        continue
+                results.append(os.path.join(sub_dir, fname).replace("\\", "/"))
+            except Exception as e:
+                logger.warning(f"下载媒体出错 {url}: {e}")
+                results.append(None)
+        return results
 
     def get_user_weibo_list(self, user_id, is_ori=1, is_forward=1, is_text=1, is_pic=1,
                             is_video=1, is_music=1, keyword="", start_date=None, end_date=None,
@@ -1199,8 +1406,11 @@ def run_task(user_id, user_name, start_date, end_date,
              keyword="", is_ori=1, is_forward=0, is_text=1, is_pic=1,
              is_video=1, is_music=1, manual_callback=None,
              wait_callback=None, progress_callback=None, data_root=None,
-             keep_browser_open=False, skip_export=False):
-    """一键爬取任务:收集指定时间范围的微博ID并导出 Markdown
+             keep_browser_open=False, skip_export=False,
+             min_interval=3, max_interval=8,
+             download_images=False, download_videos=False,
+             export_format="md"):
+    """一键爬取任务:收集指定时间范围的微博ID并导出
 
     参数:
       user_id / user_name    博主微博ID与昵称
@@ -1210,9 +1420,12 @@ def run_task(user_id, user_name, start_date, end_date,
       manual_callback        手动输入类名的回调,签名 (key, current) -> str
       wait_callback          等待用户操作的回调(如手动登录后继续),签名 (message) -> None
       progress_callback      进度回调(用于 GUI 显示)
-      data_root              数据输出根目录;None 时默认程序目录下的 DataPC
+      data_root              数据输出根目录,默认 DataPC
       keep_browser_open      完成后是否保留浏览器窗口
-      skip_export            只收集ID,不导出Markdown
+      skip_export            只收集ID,不导出
+      min_interval/max_interval  每条微博之间随机等待秒数范围
+      download_images/videos 是否下载图片/视频
+      export_format          导出格式 "md" 或 "docx"
 
     返回 dict:
       {"username", "weibo_ids", "txt_file", "md_dir", "exported", "failed"}
@@ -1220,6 +1433,22 @@ def run_task(user_id, user_name, start_date, end_date,
     ensure_logger()
     if not data_root:
         data_root = os.path.join(app_dir(), "DataPC")
+
+    # 跨月提示:建议按 1 个月爬取(路线图要求)
+    try:
+        d_start = datetime.strptime(start_date, "%Y-%m-%d")
+        d_end = datetime.strptime(end_date, "%Y-%m-%d")
+        if (d_end.year * 12 + d_end.month) - (d_start.year * 12 + d_start.month) > 1:
+            logger.warning(
+                "提示:您选择的时间范围超过 1 个月。为避免被微博风控和长时间等待,"
+                "建议先按 1 个月爬取试验,再逐步扩大范围。")
+    except Exception:
+        pass
+
+    # 间隔过短提示(路线图要求)
+    if min_interval < 2:
+        logger.warning("提示:爬取间隔过短(<2秒)可能触发微博风控,建议设置 3 秒以上。")
+
     crawler = WeiboPCCrawler(headless=headless, user_data_dir=user_data_dir,
                              wait_callback=wait_callback,
                              manual_callback=manual_callback)
@@ -1266,13 +1495,17 @@ def run_task(user_id, user_name, start_date, end_date,
         if skip_export:
             return result
 
-        # 3. 导出 Markdown(重跑时覆盖同名文件,避免生成 _1 副本)
+        # 3. 导出(按 YYYY-MM 月份子文件夹保存,重跑时覆盖同名文件)
         md_dir = os.path.join(data_dir, f"{result['username']}_{user_id}_{start_date}_{end_date}")
         os.makedirs(md_dir, exist_ok=True)
         result["md_dir"] = md_dir
         ok_count, fail_count = crawler.export_markdowns(
             weibo_ids, user_id, result["username"], md_dir,
-            progress_callback=progress_callback, overwrite=True)
+            progress_callback=progress_callback, overwrite=True,
+            month_subdirs=True,
+            min_interval=min_interval, max_interval=max_interval,
+            download_images=download_images, download_videos=download_videos,
+            export_format=export_format)
         result["exported"] = ok_count
         result["failed"] = fail_count
 

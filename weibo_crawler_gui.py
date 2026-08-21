@@ -19,7 +19,7 @@ import queue
 import sys
 import threading
 import tkinter as tk
-from datetime import datetime
+from datetime import datetime, timedelta
 from tkinter import messagebox, scrolledtext, ttk
 
 from weibo_crawler_core import (
@@ -124,12 +124,32 @@ class WeiboCrawlerGUI:
         row2 = ttk.Frame(frame_top)
         row2.pack(fill="x", pady=(8, 0))
         ttk.Label(row2, text="开始日期:").pack(side="left")
-        self.var_start = tk.StringVar(value="2026-04-01")
-        ttk.Entry(row2, textvariable=self.var_start, width=14).pack(side="left", padx=(4, 20))
+
+        # 日期选择器:年/月下拉框,避免手动输入和判断每月天数
+        now = datetime.now()
+        years = [str(y) for y in range(now.year - 3, now.year + 1)]
+        months = [f"{m:02d}" for m in range(1, 13)]
+
+        self.var_start_year = tk.StringVar(value="2026")
+        self.var_start_month = tk.StringVar(value="04")
+        ttk.Combobox(row2, textvariable=self.var_start_year, values=years,
+                     width=6, state="readonly").pack(side="left")
+        ttk.Label(row2, text="年").pack(side="left")
+        ttk.Combobox(row2, textvariable=self.var_start_month, values=months,
+                     width=4, state="readonly").pack(side="left")
+        ttk.Label(row2, text="月", foreground="gray").pack(side="left", padx=(0, 20))
+
         ttk.Label(row2, text="结束日期:").pack(side="left")
-        self.var_end = tk.StringVar(value="2026-04-30")
-        ttk.Entry(row2, textvariable=self.var_end, width=14).pack(side="left", padx=4)
-        ttk.Label(row2, text="  (格式: YYYY-MM-DD)", foreground="gray").pack(side="left")
+        self.var_end_year = tk.StringVar(value="2026")
+        self.var_end_month = tk.StringVar(value="04")
+        ttk.Combobox(row2, textvariable=self.var_end_year, values=years,
+                     width=6, state="readonly").pack(side="left")
+        ttk.Label(row2, text="年").pack(side="left")
+        ttk.Combobox(row2, textvariable=self.var_end_month, values=months,
+                     width=4, state="readonly").pack(side="left")
+        ttk.Label(row2, text="月").pack(side="left")
+        ttk.Label(row2, text="  (按整月爬取,自动处理每月天数)",
+                  foreground="gray").pack(side="left", padx=6)
 
         # 高级设置
         frame_adv = ttk.LabelFrame(self.root, text="高级设置", padding=10)
@@ -149,6 +169,32 @@ class WeiboCrawlerGUI:
         ttk.Checkbutton(row4, text="完成后保留浏览器", variable=self.var_keep_browser).pack(side="left")
         self.var_skip_export = tk.BooleanVar(value=False)
         ttk.Checkbutton(row4, text="只收集ID不导出MD", variable=self.var_skip_export).pack(side="left", padx=10)
+
+        # 路线图更新1: 爬取间隔可自定义
+        row4b = ttk.Frame(frame_adv)
+        row4b.pack(fill="x", pady=(6, 0))
+        ttk.Label(row4b, text="爬取间隔(秒):").pack(side="left")
+        self.var_min_interval = tk.StringVar(value="3")
+        ttk.Spinbox(row4b, from_=1, to=60, textvariable=self.var_min_interval,
+                    width=4).pack(side="left", padx=2)
+        ttk.Label(row4b, text="~").pack(side="left")
+        self.var_max_interval = tk.StringVar(value="8")
+        ttk.Spinbox(row4b, from_=1, to=120, textvariable=self.var_max_interval,
+                    width=4).pack(side="left", padx=2)
+        ttk.Label(row4b, text="秒  (提示:勿设置过短,避免触发风控)",
+                  foreground="gray").pack(side="left", padx=6)
+
+        # 路线图更新3/4: 图片视频下载 + 导出格式
+        row4c = ttk.Frame(frame_adv)
+        row4c.pack(fill="x", pady=(6, 0))
+        self.var_download_images = tk.BooleanVar(value=False)
+        ttk.Checkbutton(row4c, text="下载图片", variable=self.var_download_images).pack(side="left")
+        self.var_download_videos = tk.BooleanVar(value=False)
+        ttk.Checkbutton(row4c, text="下载视频", variable=self.var_download_videos).pack(side="left", padx=10)
+        ttk.Label(row4c, text="导出格式:").pack(side="left", padx=(10, 0))
+        self.var_export_format = tk.StringVar(value="md")
+        ttk.Combobox(row4c, textvariable=self.var_export_format, values=["md", "docx"],
+                     width=6, state="readonly").pack(side="left")
 
         # 类名覆盖
         row5 = ttk.Frame(frame_adv)
@@ -280,23 +326,39 @@ class WeiboCrawlerGUI:
         messagebox.showinfo("请完成操作", message, parent=self.root)
         self.wait_resp_queue.put(True)
 
+    @staticmethod
+    def _month_range(year_str, month_str):
+        """根据年月计算该月的起止日期(自动处理每月天数)"""
+        year = int(year_str)
+        month = int(month_str)
+        start = f"{year:04d}-{month:02d}-01"
+        if month == 12:
+            next_month = datetime(year + 1, 1, 1)
+        else:
+            next_month = datetime(year, month + 1, 1)
+        last_day = (next_month - timedelta(days=1)).day
+        end = f"{year:04d}-{month:02d}-{last_day:02d}"
+        return start, end
+
     def _start(self):
         if self.running:
             return
         name = self.var_name.get().strip()
         uid = self.var_uid.get().strip()
-        start = self.var_start.get().strip()
-        end = self.var_end.get().strip()
 
-        if not (name and uid and start and end):
-            messagebox.showwarning("参数不完整", "请填写博主昵称、微博ID、开始日期和结束日期")
+        # 从年/月选择器解析日期(自动处理每月天数)
+        try:
+            start, end = self._month_range(self.var_start_year.get(), self.var_start_month.get())
+            if (int(self.var_end_year.get()), int(self.var_end_month.get())) != \
+               (int(self.var_start_year.get()), int(self.var_start_month.get())):
+                end, _ = self._month_range(self.var_end_year.get(), self.var_end_month.get())
+        except (ValueError, TypeError):
+            messagebox.showwarning("日期错误", "请选择有效的开始/结束年月")
             return
-        for d in (start, end):
-            try:
-                datetime.strptime(d, "%Y-%m-%d")
-            except ValueError:
-                messagebox.showwarning("日期格式错误", f"日期 {d} 格式应为 YYYY-MM-DD")
-                return
+
+        if not (name and uid):
+            messagebox.showwarning("参数不完整", "请填写博主昵称和微博ID")
+            return
 
         # 读取类名覆盖
         cm = ClassNameManager(manual_callback=self.manual_callback)
@@ -308,6 +370,16 @@ class WeiboCrawlerGUI:
                 changed = True
         if changed:
             cm.save()
+
+        # 解析间隔范围
+        try:
+            min_interval = int(self.var_min_interval.get())
+            max_interval = int(self.var_max_interval.get())
+            if min_interval < 1 or max_interval < min_interval:
+                raise ValueError
+        except ValueError:
+            messagebox.showwarning("间隔错误", "请正确填写爬取间隔(最小>=1,最大>=最小)")
+            return
 
         self.running = True
         self.btn_start.configure(state="disabled")
@@ -328,6 +400,11 @@ class WeiboCrawlerGUI:
             "data_root": None,
             "keep_browser_open": self.var_keep_browser.get(),
             "skip_export": self.var_skip_export.get(),
+            "min_interval": min_interval,
+            "max_interval": max_interval,
+            "download_images": self.var_download_images.get(),
+            "download_videos": self.var_download_videos.get(),
+            "export_format": self.var_export_format.get(),
         }
 
         self.worker = threading.Thread(target=self._run_worker, args=(kwargs,), daemon=True)
