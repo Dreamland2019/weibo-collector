@@ -13,6 +13,7 @@
   - 日志实时显示
 """
 
+import json
 import logging
 import os
 import queue
@@ -88,6 +89,7 @@ class WeiboCrawlerGUI:
         self.wait_resp_queue = queue.Queue()    # 主线程 -> 后台线程:用户已确认
         self.worker = None
         self.running = False
+        self.settings = self._load_settings()
 
         self._build_ui()
 
@@ -102,6 +104,37 @@ class WeiboCrawlerGUI:
 
         # 窗口关闭时清理
         root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    # ---------- 设置持久化(记住上次选择的日期等) ----------
+
+    def _settings_path(self):
+        """设置文件路径:与程序同目录(exe 版在 exe 旁,源码版在脚本旁)"""
+        return os.path.join(app_dir(), "gui_settings.json")
+
+    def _load_settings(self):
+        """加载上次保存的设置,文件不存在或损坏时返回空字典"""
+        try:
+            with open(self._settings_path(), "r", encoding="utf-8") as f:
+                data = json.load(f)
+                return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    def _save_settings(self):
+        """保存当前设置(日期等)到文件"""
+        try:
+            data = {
+                "start_year": self.var_start_year.get(),
+                "start_month": self.var_start_month.get(),
+                "start_day": self.var_start_day.get(),
+                "end_year": self.var_end_year.get(),
+                "end_month": self.var_end_month.get(),
+                "end_day": self.var_end_day.get(),
+            }
+            with open(self._settings_path(), "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.warning(f"保存设置失败: {e}")
 
     # ---------- UI 构建 ----------
 
@@ -126,13 +159,15 @@ class WeiboCrawlerGUI:
         ttk.Label(row2, text="开始日期:").pack(side="left")
 
         # 日期选择器:年/月/日下拉框,自动处理每月天数(大小月/闰年)
+        # 初始值:优先读取上次保存的设置;首次使用则为空,由用户自行选择
         now = datetime.now()
         years = [str(y) for y in range(now.year - 3, now.year + 1)]
         months = [f"{m:02d}" for m in range(1, 13)]
+        st = self.settings
 
-        self.var_start_year = tk.StringVar(value="2026")
-        self.var_start_month = tk.StringVar(value="04")
-        self.var_start_day = tk.StringVar(value="01")
+        self.var_start_year = tk.StringVar(value=st.get("start_year", ""))
+        self.var_start_month = tk.StringVar(value=st.get("start_month", ""))
+        self.var_start_day = tk.StringVar(value=st.get("start_day", ""))
         ttk.Combobox(row2, textvariable=self.var_start_year, values=years,
                      width=6, state="readonly").pack(side="left")
         ttk.Label(row2, text="年").pack(side="left")
@@ -146,9 +181,9 @@ class WeiboCrawlerGUI:
         ttk.Label(row2, text="日", foreground="gray").pack(side="left", padx=(0, 20))
 
         ttk.Label(row2, text="结束日期:").pack(side="left")
-        self.var_end_year = tk.StringVar(value="2026")
-        self.var_end_month = tk.StringVar(value="04")
-        self.var_end_day = tk.StringVar(value="30")
+        self.var_end_year = tk.StringVar(value=st.get("end_year", ""))
+        self.var_end_month = tk.StringVar(value=st.get("end_month", ""))
+        self.var_end_day = tk.StringVar(value=st.get("end_day", ""))
         ttk.Combobox(row2, textvariable=self.var_end_year, values=years,
                      width=6, state="readonly").pack(side="left")
         ttk.Label(row2, text="年").pack(side="left")
@@ -370,6 +405,9 @@ class WeiboCrawlerGUI:
         except (ValueError, TypeError):
             days = [f"{d:02d}" for d in range(1, 32)]
         day_cb.configure(values=days)
+        # 年月未选择时,日保持为空,不自动填充
+        if not year_var.get() or not month_var.get():
+            return
         # 当前选中的日若超出新月份天数(如 31 日 -> 2 月),自动修正
         if day_var.get() not in days:
             day_var.set(days[-1])
@@ -409,6 +447,9 @@ class WeiboCrawlerGUI:
         if not (name and uid):
             messagebox.showwarning("参数不完整", "请填写博主昵称和微博ID")
             return
+
+        # 记住本次选择的日期,下次打开自动填入
+        self._save_settings()
 
         # 读取类名覆盖
         cm = ClassNameManager(manual_callback=self.manual_callback)

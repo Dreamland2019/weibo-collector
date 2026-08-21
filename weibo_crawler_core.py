@@ -1237,7 +1237,9 @@ class WeiboPCCrawler:
             # 生成内容并写入
             try:
                 if export_format == "docx":
-                    self._write_docx(detail, output_path)
+                    self._write_docx(detail, output_path, month_dir,
+                                     local_images, local_videos,
+                                     download_images, download_videos)
                 else:
                     md_content = self.generate_markdown(detail)
                     if detail.get("images"):
@@ -1292,25 +1294,88 @@ class WeiboPCCrawler:
         return output_dir
 
     @staticmethod
-    def _write_docx(detail, output_path):
-        """将详情导出为 docx 文件(使用 python-docx)"""
+    def _write_docx(detail, output_path, media_dir=None,
+                    local_images=None, local_videos=None,
+                    download_images=False, download_videos=False):
+        """将详情导出为 docx 文件(使用 python-docx)
+
+        - 全文使用宋体
+        - 已下载的图片: 直接嵌入文档(按顺序)
+        - 未下载的图片: 写入图片URL,并提示可勾选"下载图片"后重新导出
+        - 视频: docx 无法嵌入,写入本地路径/链接并提示
+        """
         from docx import Document
-        from docx.shared import Pt
+        from docx.shared import Pt, Cm
+        from docx.oxml.ns import qn
 
         doc = Document()
-        doc.add_paragraph(f"URL：{detail['url']}")
-        doc.add_paragraph(f"发布时间：{detail['publish_time']}")
-        doc.add_paragraph(f"词条：{detail['topics']}")
-        doc.add_paragraph(f"正文字数：{len(detail['content'])}字符")
-        doc.add_paragraph("—" * 20)
-        doc.add_paragraph("正文：")
+
+        # 设置默认字体为宋体(含中文 eastAsia 字体)
+        style = doc.styles['Normal']
+        style.font.name = '宋体'
+        style.font.size = Pt(11)
+        style.element.rPr.rFonts.set(qn('w:eastAsia'), '宋体')
+
+        def add_para(text, bold=False):
+            p = doc.add_paragraph()
+            run = p.add_run(text)
+            run.font.name = '宋体'
+            run._element.rPr.rFonts.set(qn('w:eastAsia'), '宋体')
+            run.font.bold = bold
+            return p
+
+        add_para(f"URL：{detail['url']}")
+        add_para(f"发布时间：{detail['publish_time']}")
+        add_para(f"词条：{detail['topics']}")
+        add_para(f"正文字数：{len(detail['content'])}字符")
+        add_para("—" * 20)
+        add_para("正文：", bold=True)
         for line in detail['content'].splitlines():
-            doc.add_paragraph(line)
-        doc.add_paragraph("—" * 20)
-        doc.add_paragraph(f"转发数：{detail['repost_count']}")
-        doc.add_paragraph(f"评论数：{detail['comment_count']}")
-        doc.add_paragraph(f"点赞数：{detail['like_count']}")
-        doc.add_paragraph(f"保存时间：{detail['save_time']}")
+            add_para(line)
+        add_para("—" * 20)
+
+        # 图片: 已下载则嵌入,否则写URL
+        images = detail.get("images") or []
+        if images:
+            add_para("图片：", bold=True)
+            local_images = local_images or []
+            for idx, img_url in enumerate(images, 1):
+                local_path = None
+                if idx <= len(local_images) and local_images[idx - 1]:
+                    local_path = local_images[idx - 1]
+                if local_path and media_dir:
+                    full = os.path.join(media_dir, local_path)
+                    if os.path.exists(full):
+                        try:
+                            doc.add_picture(full, width=Cm(12))
+                            continue
+                        except Exception as e:
+                            logger.warning(f"docx 插入图片失败 {full}: {e}")
+                    add_para(f"图片{idx}: {local_path}(文件缺失)")
+                else:
+                    add_para(f"图片{idx}(未下载): {img_url}")
+            if not download_images:
+                add_para("提示: 如需将图片嵌入本文档,请在爬取时勾选“下载图片”后重新导出。")
+
+        # 视频: docx 无法嵌入,写链接
+        videos = detail.get("videos") or []
+        if videos:
+            add_para("视频：", bold=True)
+            local_videos = local_videos or []
+            for i2, v_url in enumerate(videos):
+                if i2 < len(local_videos) and local_videos[i2]:
+                    add_para(f"视频{i2 + 1}(已下载): {local_videos[i2]}")
+                else:
+                    add_para(f"视频{i2 + 1}: {v_url}")
+            if not download_videos:
+                add_para("提示: docx 无法嵌入视频,已下载的视频文件在同目录 videos/ 文件夹中;"
+                         "如需下载请勾选“下载视频”后重新导出。")
+
+        add_para("—" * 20)
+        add_para(f"转发数：{detail['repost_count']}")
+        add_para(f"评论数：{detail['comment_count']}")
+        add_para(f"点赞数：{detail['like_count']}")
+        add_para(f"保存时间：{detail['save_time']}")
         doc.save(output_path)
 
     @staticmethod
