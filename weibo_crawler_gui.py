@@ -125,31 +125,57 @@ class WeiboCrawlerGUI:
         row2.pack(fill="x", pady=(8, 0))
         ttk.Label(row2, text="开始日期:").pack(side="left")
 
-        # 日期选择器:年/月下拉框,避免手动输入和判断每月天数
+        # 日期选择器:年/月/日下拉框,自动处理每月天数(大小月/闰年)
         now = datetime.now()
         years = [str(y) for y in range(now.year - 3, now.year + 1)]
         months = [f"{m:02d}" for m in range(1, 13)]
 
         self.var_start_year = tk.StringVar(value="2026")
         self.var_start_month = tk.StringVar(value="04")
+        self.var_start_day = tk.StringVar(value="01")
         ttk.Combobox(row2, textvariable=self.var_start_year, values=years,
                      width=6, state="readonly").pack(side="left")
         ttk.Label(row2, text="年").pack(side="left")
-        ttk.Combobox(row2, textvariable=self.var_start_month, values=months,
-                     width=4, state="readonly").pack(side="left")
-        ttk.Label(row2, text="月", foreground="gray").pack(side="left", padx=(0, 20))
+        start_month_cb = ttk.Combobox(row2, textvariable=self.var_start_month, values=months,
+                                      width=4, state="readonly")
+        start_month_cb.pack(side="left")
+        ttk.Label(row2, text="月").pack(side="left")
+        self.start_day_cb = ttk.Combobox(row2, textvariable=self.var_start_day,
+                                         width=4, state="readonly")
+        self.start_day_cb.pack(side="left")
+        ttk.Label(row2, text="日", foreground="gray").pack(side="left", padx=(0, 20))
 
         ttk.Label(row2, text="结束日期:").pack(side="left")
         self.var_end_year = tk.StringVar(value="2026")
         self.var_end_month = tk.StringVar(value="04")
+        self.var_end_day = tk.StringVar(value="30")
         ttk.Combobox(row2, textvariable=self.var_end_year, values=years,
                      width=6, state="readonly").pack(side="left")
         ttk.Label(row2, text="年").pack(side="left")
-        ttk.Combobox(row2, textvariable=self.var_end_month, values=months,
-                     width=4, state="readonly").pack(side="left")
+        end_month_cb = ttk.Combobox(row2, textvariable=self.var_end_month, values=months,
+                                    width=4, state="readonly")
+        end_month_cb.pack(side="left")
         ttk.Label(row2, text="月").pack(side="left")
-        ttk.Label(row2, text="  (按整月爬取,自动处理每月天数)",
+        self.end_day_cb = ttk.Combobox(row2, textvariable=self.var_end_day,
+                                       width=4, state="readonly")
+        self.end_day_cb.pack(side="left")
+        ttk.Label(row2, text="日").pack(side="left")
+        ttk.Label(row2, text="  (日的选项随年月自动调整)",
                   foreground="gray").pack(side="left", padx=6)
+
+        # 初始化日的选项,并在年/月变化时刷新
+        self._refresh_day_options(self.var_start_year, self.var_start_month,
+                                  self.var_start_day, self.start_day_cb)
+        self._refresh_day_options(self.var_end_year, self.var_end_month,
+                                  self.var_end_day, self.end_day_cb)
+        start_month_cb.bind("<<ComboboxSelected>>", lambda e: self._refresh_day_options(
+            self.var_start_year, self.var_start_month, self.var_start_day, self.start_day_cb))
+        self.var_start_year.trace_add("write", lambda *a: self._refresh_day_options(
+            self.var_start_year, self.var_start_month, self.var_start_day, self.start_day_cb))
+        end_month_cb.bind("<<ComboboxSelected>>", lambda e: self._refresh_day_options(
+            self.var_end_year, self.var_end_month, self.var_end_day, self.end_day_cb))
+        self.var_end_year.trace_add("write", lambda *a: self._refresh_day_options(
+            self.var_end_year, self.var_end_month, self.var_end_day, self.end_day_cb))
 
         # 高级设置
         frame_adv = ttk.LabelFrame(self.root, text="高级设置", padding=10)
@@ -327,6 +353,28 @@ class WeiboCrawlerGUI:
         self.wait_resp_queue.put(True)
 
     @staticmethod
+    def _days_in_month(year, month):
+        """返回某年某月的天数(自动处理大小月与闰年)"""
+        if month == 12:
+            next_month = datetime(year + 1, 1, 1)
+        else:
+            next_month = datetime(year, month + 1, 1)
+        return (next_month - timedelta(days=1)).day
+
+    def _refresh_day_options(self, year_var, month_var, day_var, day_cb):
+        """根据当前选中的年/月刷新"日"下拉选项(如 2 月只有 1~28/29)"""
+        try:
+            year = int(year_var.get())
+            month = int(month_var.get())
+            days = [f"{d:02d}" for d in range(1, self._days_in_month(year, month) + 1)]
+        except (ValueError, TypeError):
+            days = [f"{d:02d}" for d in range(1, 32)]
+        day_cb.configure(values=days)
+        # 当前选中的日若超出新月份天数(如 31 日 -> 2 月),自动修正
+        if day_var.get() not in days:
+            day_var.set(days[-1])
+
+    @staticmethod
     def _month_range(year_str, month_str):
         """根据年月计算该月的起止日期(自动处理每月天数)"""
         year = int(year_str)
@@ -346,14 +394,16 @@ class WeiboCrawlerGUI:
         name = self.var_name.get().strip()
         uid = self.var_uid.get().strip()
 
-        # 从年/月选择器解析日期(自动处理每月天数)
+        # 从年/月/日选择器解析日期
         try:
-            start, end = self._month_range(self.var_start_year.get(), self.var_start_month.get())
-            if (int(self.var_end_year.get()), int(self.var_end_month.get())) != \
-               (int(self.var_start_year.get()), int(self.var_start_month.get())):
-                end, _ = self._month_range(self.var_end_year.get(), self.var_end_month.get())
+            start = (f"{int(self.var_start_year.get()):04d}-"
+                     f"{int(self.var_start_month.get()):02d}-"
+                     f"{int(self.var_start_day.get()):02d}")
+            end = (f"{int(self.var_end_year.get()):04d}-"
+                   f"{int(self.var_end_month.get()):02d}-"
+                   f"{int(self.var_end_day.get()):02d}")
         except (ValueError, TypeError):
-            messagebox.showwarning("日期错误", "请选择有效的开始/结束年月")
+            messagebox.showwarning("日期错误", "请选择有效的开始/结束日期")
             return
 
         if not (name and uid):
