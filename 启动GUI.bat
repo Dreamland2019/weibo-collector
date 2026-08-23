@@ -1,9 +1,26 @@
 @echo off
-rem Е╬╝Е█ Г┬╛Х≥╚ GUI Е░╞Е┼╗Х└ Ф°╛(Д╫©Г■╗ pythonw.exe Х©░Х║▄,Д╦█Ф≤╬Г╓╨Е▒╫Д╩╓Х║▄И╩▒Г╙≈Е▐ё)
+rem ============================================================
+rem  weibo-md-exporter GUI фТ╤╞╫е╠╬
+rem  1) сеохй╧сц╠╬д©б╪ venv;2) нч venv тРлАй╬охткпп ╟╡в╟.bat
+rem ============================================================
+chcp 936 >nul
 cd /d %~dp0
 
-set "PYTHONW=%~dp0venv\Scripts\pythonw.exe"
-if not exist "%PYTHONW%" set "PYTHONW=pythonw.exe"
+if exist "%~dp0venv\Scripts\pythonw.exe" (
+    start "" "%~dp0venv\Scripts\pythonw.exe" "%~dp0weibo_crawler_gui.py"
+    exit /b 0
+)
 
-start "" "%PYTHONW%" "%~dp0weibo_crawler_gui.py"
-exit /b 0
+rem нч venv: Ё╒йто╣мЁ pythonw(пХряв╟рюю╣)
+where pythonw >nul 2>nul
+if %errorlevel%==0 (
+    start "" pythonw "%~dp0weibo_crawler_gui.py"
+    exit /b 0
+)
+
+echo.
+echo [╢МнС] н╢ур╣╫©исц╣д Python ╩╥╬Ё║ё
+echo гКохк╚╩Вткпп ╟╡в╟.bat мЙЁи╩╥╬ЁеДжц,тыткпп╠╬╫е╠╬║ё
+echo.
+pause
+exit /b 1

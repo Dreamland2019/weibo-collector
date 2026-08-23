@@ -70,6 +70,8 @@ def parse_args():
     p_crawl.add_argument("--content-class", dest="content_class", help="正文类名(覆盖)")
     p_crawl.add_argument("--wrap-class", dest="wrap_class", help="转评赞容器类名(覆盖)")
     p_crawl.add_argument("--num-class", dest="num_class", help="转评赞数字类名(覆盖)")
+    p_crawl.add_argument("--skip-existing", action="store_true",
+                         help="跳过已存在同ID文件的微博(避免重复抓取)")
     p_crawl.set_defaults(command="crawl")
 
     # ---- 筛选子命令 ----
@@ -199,6 +201,7 @@ def cmd_crawl(args):
         download_images=args.download_images,
         download_videos=args.download_videos,
         export_format=args.export_format,
+        skip_existing=args.skip_existing,
     )
 
     print()
@@ -213,7 +216,7 @@ def cmd_crawl(args):
         print(f"  ID文件: {result['txt_file']}")
     if result.get("md_dir"):
         print(f"  MD目录: {result['md_dir']}")
-        print(f"  导出成功: {result['exported']} 条, 失败: {result['failed']} 条")
+        print(f"  导出成功: {result['exported']} 条, 失败: {result['failed']} 条, 跳过: {result['skipped']} 条")
     print("=" * 60)
 
 

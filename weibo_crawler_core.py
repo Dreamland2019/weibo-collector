@@ -1173,7 +1173,7 @@ class WeiboPCCrawler:
                          min_interval=3, max_interval=8, progress_callback=None,
                          overwrite=False, month_subdirs=True,
                          download_images=False, download_videos=False,
-                         export_format="md"):
+                         export_format="md", skip_existing=False):
         """逐条抓取详情并导出(支持 md / docx 格式)
 
         参数:
@@ -1182,18 +1182,27 @@ class WeiboPCCrawler:
           month_subdirs                按 YYYY-MM 月份子文件夹保存
           download_images/videos       是否下载图片/视频到本地
           export_format                "md" 或 "docx"
+          skip_existing                已存在同ID文件时跳过(不重复抓取)
 
-        返回 (成功数, 失败数)
+        返回 (成功数, 失败数, 跳过数)
         """
         output_dir = base_dir  # 已由调用方创建
         ok_count = 0
         fail_count = 0
+        skipped_count = 0
         total = len(weibo_ids)
 
         for i, weibo_id in enumerate(weibo_ids):
             logger.info(f"正在处理第 {i + 1}/{total} 个微博: {weibo_id}")
             if progress_callback:
                 progress_callback(i + 1, total, weibo_id)
+
+            # 跳过已存在文件(按微博ID匹配,避免重复抓取)
+            if skip_existing and self._weibo_file_exists(
+                    output_dir, weibo_id, export_format):
+                skipped_count += 1
+                logger.info(f"已存在同ID文件,跳过: {weibo_id}")
+                continue
 
             detail = self.get_weibo_detail(weibo_id, user_id)
             if not detail:
@@ -1272,8 +1281,31 @@ class WeiboPCCrawler:
                 logger.info(f"等待 {sleep_time} 秒后处理下一个...")
                 time.sleep(sleep_time)
 
-        logger.info(f"导出完成: 成功 {ok_count} 条, 失败 {fail_count} 条")
-        return ok_count, fail_count
+        logger.info(f"导出完成: 成功 {ok_count} 条, 失败 {fail_count} 条, 跳过 {skipped_count} 条")
+        return ok_count, fail_count, skipped_count
+
+    def _weibo_file_exists(self, output_dir, weibo_id, export_format="md"):
+        """检查指定微博ID是否已有导出文件(在 年份/月份 目录树中查找)
+
+        文件名格式: <博主>_<日期>_<微博ID>.md|docx
+        """
+        ext = ".docx" if export_format == "docx" else ".md"
+        target = f"_{weibo_id}{ext}"
+        try:
+            for year_item in os.listdir(output_dir):
+                year_path = os.path.join(output_dir, year_item)
+                if not (os.path.isdir(year_path) and year_item.endswith("年")):
+                    continue
+                for month_item in os.listdir(year_path):
+                    month_path = os.path.join(year_path, month_item)
+                    if not (os.path.isdir(month_path) and month_item.endswith("月")):
+                        continue
+                    for f in os.listdir(month_path):
+                        if f.endswith(target):
+                            return True
+        except Exception as e:
+            logger.warning(f"检查已存在文件时出错: {e}")
+        return False
 
     @staticmethod
     def _publish_month_dir(publish_time, output_dir):
@@ -1496,7 +1528,7 @@ def run_task(user_id, user_name, start_date, end_date,
              keep_browser_open=False, skip_export=False,
              min_interval=3, max_interval=8,
              download_images=False, download_videos=False,
-             export_format="md"):
+             export_format="md", skip_existing=False):
     """一键爬取任务:收集指定时间范围的微博ID并导出
 
     参数:
@@ -1513,6 +1545,7 @@ def run_task(user_id, user_name, start_date, end_date,
       min_interval/max_interval  每条微博之间随机等待秒数范围
       download_images/videos 是否下载图片/视频
       export_format          导出格式 "md" 或 "docx"
+      skip_existing          跳过已存在同ID文件的微博(避免重复抓取)
 
     返回 dict:
       {"username", "weibo_ids", "txt_file", "md_dir", "exported", "failed"}
@@ -1546,7 +1579,7 @@ def run_task(user_id, user_name, start_date, end_date,
 
     result = {
         "username": user_name, "weibo_ids": [], "txt_file": None,
-        "md_dir": None, "exported": 0, "failed": 0,
+        "md_dir": None, "exported": 0, "failed": 0, "skipped": 0,
     }
 
     try:
@@ -1587,15 +1620,16 @@ def run_task(user_id, user_name, start_date, end_date,
 
         # 3. 导出(新结构: 博主目录/年份/月份/文件,重跑时覆盖同名文件)
         result["md_dir"] = data_dir
-        ok_count, fail_count = crawler.export_markdowns(
+        ok_count, fail_count, skipped_count = crawler.export_markdowns(
             weibo_ids, user_id, result["username"], data_dir,
             progress_callback=progress_callback, overwrite=True,
             month_subdirs=True,
             min_interval=min_interval, max_interval=max_interval,
             download_images=download_images, download_videos=download_videos,
-            export_format=export_format)
+            export_format=export_format, skip_existing=skip_existing)
         result["exported"] = ok_count
         result["failed"] = fail_count
+        result["skipped"] = skipped_count
 
     except RuntimeError as e:
         # 预期内的业务错误(如博主该时间段无微博、类名无法确定),只提示不打印堆栈

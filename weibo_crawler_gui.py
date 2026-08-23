@@ -145,6 +145,7 @@ class WeiboCrawlerGUI:
             "download_images": self.var_download_images.get(),
             "download_videos": self.var_download_videos.get(),
             "export_format": self.var_export_format.get(),
+            "skip_existing": self.var_skip_existing.get(),
         }
         # 类名覆盖
         for key, var in self.class_vars.items():
@@ -175,6 +176,7 @@ class WeiboCrawlerGUI:
         self.var_download_images.set(bool(st.get("download_images", False)))
         self.var_download_videos.set(bool(st.get("download_videos", False)))
         self.var_export_format.set(st.get("export_format", self.var_export_format.get()))
+        self.var_skip_existing.set(bool(st.get("skip_existing", False)))
         for key, var in self.class_vars.items():
             val = st.get(f"class_{key}", "")
             if val:
@@ -306,6 +308,15 @@ class WeiboCrawlerGUI:
         self.var_export_format = tk.StringVar(value="md")
         ttk.Combobox(row4c, textvariable=self.var_export_format, values=["md", "docx"],
                      width=6, state="readonly").pack(side="left")
+
+        # 跳过已爬取文章
+        row4d = ttk.Frame(frame_adv)
+        row4d.pack(fill="x", pady=(6, 0))
+        self.var_skip_existing = tk.BooleanVar(value=False)
+        ttk.Checkbutton(row4d, text="跳过已爬取的文章(按微博ID去重)",
+                        variable=self.var_skip_existing).pack(side="left")
+        ttk.Label(row4d, text="  (重新爬取时,已存在同ID文件的不再抓取)",
+                  foreground="gray").pack(side="left")
 
         # 类名覆盖
         row5 = ttk.Frame(frame_adv)
@@ -640,6 +651,7 @@ class WeiboCrawlerGUI:
             "download_images": self.var_download_images.get(),
             "download_videos": self.var_download_videos.get(),
             "export_format": self.var_export_format.get(),
+            "skip_existing": self.var_skip_existing.get(),
         }
 
         self.worker = threading.Thread(target=self._run_worker, args=(kwargs,), daemon=True)
@@ -656,7 +668,8 @@ class WeiboCrawlerGUI:
             else:
                 final_msg = (
                     f"\n任务完成: 收集 {len(result['weibo_ids'])} 条微博, "
-                    f"导出成功 {result['exported']} 条, 失败 {result['failed']} 条\n"
+                    f"导出成功 {result['exported']} 条, 失败 {result['failed']} 条, "
+                    f"跳过 {result.get('skipped', 0)} 条\n"
                     f"ID文件: {result.get('txt_file') or '无'}\n"
                     f"MD目录: {result.get('md_dir') or '无'}"
                 )

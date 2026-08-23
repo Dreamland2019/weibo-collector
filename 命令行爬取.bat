@@ -1,5 +1,6 @@
 @echo off
-rem 微博爬虫 CLI 交互模式(直接双击即可按提示输入博主/日期运行)
+rem weibo-md-exporter CLI ���(�������� ��װ.bat)
+chcp 936 >nul
 cd /d %~dp0
 
 set "PYTHON=%~dp0venv\Scripts\python.exe"
