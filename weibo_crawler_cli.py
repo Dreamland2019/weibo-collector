@@ -82,6 +82,8 @@ def parse_args():
     p_filter.add_argument("--no-repost", action="store_true", help="不计入转发数")
     p_filter.add_argument("--no-comment", action="store_true", help="不计入评论数")
     p_filter.add_argument("--no-like", action="store_true", help="不计入点赞数")
+    p_filter.add_argument("--by-word-count", action="store_true",
+                          help="按正文字数排序(替代转评赞之和)")
     p_filter.add_argument("--format", dest="source_format", default="md",
                           choices=["md", "docx"], help="筛选的数据文件格式,默认md")
     p_filter.add_argument("--move", action="store_true", help="移动而非复制原文件")
@@ -255,6 +257,7 @@ def cmd_filter(args):
         use_like=not args.no_like,
         source_format=args.source_format,
         move=args.move,
+        by_word_count=args.by_word_count,
     )
     print()
     print("=" * 60)

@@ -1734,14 +1734,15 @@ class ArticleFilter:
     # ---------- 统计解析 ----------
 
     def read_stats(self, file_path):
-        """读取单个文件的转评赞,返回 (repost, comment, like)"""
+        """读取单个文件的转评赞与正文字数,返回 (repost, comment, like, word_count)"""
         repost = comment = like = 0
+        word_count = 0
         try:
             if file_path.endswith(".md"):
                 with open(file_path, "r", encoding="utf-8") as f:
                     text = f.read()
                 for label, key in (("转发数", "repost"), ("评论数", "comment"),
-                                   ("点赞数", "like")):
+                                   ("点赞数", "like"), ("正文字数", "word_count")):
                     m = re.search(rf">\s*{label}\s*[:：]\s*([\d.,万亿]+)", text)
                     if m:
                         val = parse_count(m.group(1))
@@ -1749,32 +1750,39 @@ class ArticleFilter:
                             repost = val
                         elif key == "comment":
                             comment = val
-                        else:
+                        elif key == "like":
                             like = val
+                        else:
+                            word_count = val
             elif file_path.endswith(".docx"):
                 from docx import Document
                 doc = Document(file_path)
                 for p in doc.paragraphs:
                     t = p.text.strip()
-                    m = re.match(r"^(转发数|评论数|点赞数)[:：]\s*([\d.,万亿]+)$", t)
+                    m = re.match(r"^(转发数|评论数|点赞数|正文字数)[:：]\s*([\d.,万亿]+)$", t)
                     if m:
                         val = parse_count(m.group(2))
                         if m.group(1) == "转发数":
                             repost = val
                         elif m.group(1) == "评论数":
                             comment = val
-                        else:
+                        elif m.group(1) == "点赞数":
                             like = val
+                        else:
+                            word_count = val
         except Exception as e:
             logger.warning(f"读取统计失败 {file_path}: {e}")
-        return repost, comment, like
+        return repost, comment, like, word_count
 
     # ---------- 主流程 ----------
 
     def filter_top(self, user_name, user_id, start_date, end_date,
                    top_n=10, use_repost=True, use_comment=True, use_like=True,
-                   source_format="md", move=False):
-        """按转评赞之和筛选前 N 篇,复制到"筛选"文件夹
+                   source_format="md", move=False, by_word_count=False):
+        """按所选指标排序筛选前 N 篇,复制到"筛选"文件夹
+
+        by_word_count=True 时按正文字数排序(忽略转评赞勾选);
+        否则按转评赞之和排序。
 
         返回 dict: {"output_dir", "items": [...], "skipped": [...]}
         """
@@ -1790,18 +1798,22 @@ class ArticleFilter:
         # 2. 解析统计并计算得分
         records = []
         for fpath, fdate in files:
-            repost, comment, like = self.read_stats(fpath)
-            score = 0
-            if use_repost:
-                score += repost
-            if use_comment:
-                score += comment
-            if use_like:
-                score += like
+            repost, comment, like, word_count = self.read_stats(fpath)
+            if by_word_count:
+                score = word_count
+            else:
+                score = 0
+                if use_repost:
+                    score += repost
+                if use_comment:
+                    score += comment
+                if use_like:
+                    score += like
             records.append({
                 "file": fpath, "date": fdate,
                 "repost": repost, "comment": comment, "like": like,
-                "score": score,
+                "word_count": word_count, "score": score,
+                "by_word_count": by_word_count,
             })
 
         # 3. 排序取前 N(得分降序;同分按日期新->旧)
@@ -1833,35 +1845,44 @@ class ArticleFilter:
 
         # 6. 生成统计说明文件
         self._write_summary(out_dir, items, use_repost, use_comment, use_like,
-                            start_date, end_date, top_n)
+                            start_date, end_date, top_n, by_word_count)
 
         logger.info(f"筛选完成: 共扫描 {len(records)} 篇, 输出前 {len(top)} 篇到 {out_dir}")
         return {"output_dir": out_dir, "items": items, "skipped": []}
 
     @staticmethod
     def _write_summary(out_dir, items, use_repost, use_comment, use_like,
-                       start_date, end_date, top_n):
+                       start_date, end_date, top_n, by_word_count=False):
         """在输出文件夹中生成 筛选说明.txt,列出排名与各项数据"""
-        labels = []
-        if use_repost:
-            labels.append("转发")
-        if use_comment:
-            labels.append("评论")
-        if use_like:
-            labels.append("点赞")
-        metric = "+".join(labels) if labels else "(未勾选任何指标)"
+        if by_word_count:
+            metric = "正文字数"
+            header = "排名\t字数\t转发\t评论\t点赞\t文件名"
+            row = lambda i, r: (
+                f"{i}\t{r['word_count']}\t{r['repost']}\t{r['comment']}\t"
+                f"{r['like']}\t{r['new_name']}")
+        else:
+            labels = []
+            if use_repost:
+                labels.append("转发")
+            if use_comment:
+                labels.append("评论")
+            if use_like:
+                labels.append("点赞")
+            metric = "+".join(labels) if labels else "(未勾选任何指标)"
+            header = "排名\t得分\t转发\t评论\t点赞\t文件名"
+            row = lambda i, r: (
+                f"{i}\t{r['score']}\t{r['repost']}\t{r['comment']}\t"
+                f"{r['like']}\t{r['new_name']}")
 
         lines = [
             f"筛选范围: {start_date} ~ {end_date}",
-            f"排序指标: {metric} 之和",
+            f"排序指标: {metric}",
             f"输出篇数: {min(top_n, len(items))}",
             "",
-            "排名\t得分\t转发\t评论\t点赞\t文件名",
+            header,
         ]
         for i, rec in enumerate(items, 1):
-            lines.append(
-                f"{i}\t{rec['score']}\t{rec['repost']}\t{rec['comment']}\t"
-                f"{rec['like']}\t{rec['new_name']}")
+            lines.append(row(i, rec))
         try:
             with open(os.path.join(out_dir, "筛选说明.txt"),
                       "w", encoding="utf-8") as f:

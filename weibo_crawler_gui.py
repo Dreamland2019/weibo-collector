@@ -369,18 +369,30 @@ class WeiboCrawlerGUI:
 
         frow3 = ttk.Frame(frame_f1)
         frow3.pack(fill="x", pady=(8, 0))
-        ttk.Label(frow3, text="排序指标(可多选):").pack(side="left")
-        self.f_var_use_repost = tk.BooleanVar(value=True)
-        ttk.Checkbutton(frow3, text="转发", variable=self.f_var_use_repost).pack(side="left", padx=(6, 0))
-        self.f_var_use_comment = tk.BooleanVar(value=True)
-        ttk.Checkbutton(frow3, text="评论", variable=self.f_var_use_comment).pack(side="left", padx=6)
-        self.f_var_use_like = tk.BooleanVar(value=True)
-        ttk.Checkbutton(frow3, text="点赞", variable=self.f_var_use_like).pack(side="left", padx=6)
+        ttk.Label(frow3, text="排序方式:").pack(side="left")
+        self.f_var_sort_mode = tk.StringVar(value="stats")
+        ttk.Radiobutton(frow3, text="转评赞之和", variable=self.f_var_sort_mode,
+                        value="stats").pack(side="left", padx=(6, 0))
+        ttk.Radiobutton(frow3, text="正文字数", variable=self.f_var_sort_mode,
+                        value="word_count").pack(side="left", padx=6)
         ttk.Label(frow3, text="  输出篇数:").pack(side="left", padx=(16, 0))
         self.f_var_top = tk.StringVar(value="10")
         ttk.Spinbox(frow3, from_=1, to=500, textvariable=self.f_var_top,
                     width=5).pack(side="left", padx=4)
         ttk.Label(frow3, text="篇").pack(side="left")
+
+        # 转评赞子指标(仅"转评赞之和"模式生效)
+        frow3b = ttk.Frame(frame_f1)
+        frow3b.pack(fill="x", pady=(4, 0))
+        ttk.Label(frow3b, text="  计入指标:").pack(side="left")
+        self.f_var_use_repost = tk.BooleanVar(value=True)
+        ttk.Checkbutton(frow3b, text="转发", variable=self.f_var_use_repost).pack(side="left", padx=(6, 0))
+        self.f_var_use_comment = tk.BooleanVar(value=True)
+        ttk.Checkbutton(frow3b, text="评论", variable=self.f_var_use_comment).pack(side="left", padx=6)
+        self.f_var_use_like = tk.BooleanVar(value=True)
+        ttk.Checkbutton(frow3b, text="点赞", variable=self.f_var_use_like).pack(side="left", padx=6)
+        ttk.Label(frow3b, text="  (选择\"正文字数\"时此三项忽略)",
+                  foreground="gray").pack(side="left", padx=6)
 
         frow4 = ttk.Frame(frame_f1)
         frow4.pack(fill="x", pady=(8, 0))
@@ -691,6 +703,7 @@ class WeiboCrawlerGUI:
             "use_repost": self.f_var_use_repost.get(),
             "use_comment": self.f_var_use_comment.get(),
             "use_like": self.f_var_use_like.get(),
+            "by_word_count": self.f_var_sort_mode.get() == "word_count",
             "source_format": self.f_var_format.get(),
             "move": self.f_var_move.get(),
             "filter_root": self.f_var_filter_root.get().strip() or os.path.join(app_dir(), "筛选"),
@@ -711,6 +724,7 @@ class WeiboCrawlerGUI:
                 use_like=kwargs["use_like"],
                 source_format=kwargs["source_format"],
                 move=kwargs["move"],
+                by_word_count=kwargs.get("by_word_count", False),
             )
             if result["output_dir"]:
                 msg = (f"\n筛选完成: 共 {len(result['items'])} 篇\n"
