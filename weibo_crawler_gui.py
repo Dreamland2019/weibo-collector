@@ -264,6 +264,12 @@ class WeiboCrawlerGUI:
         ttk.Label(row2, text="  (年份可手动输入,日随年月自动调整)",
                   foreground="gray").pack(side="left", padx=6)
 
+        # 日期行下方的建议提示小字
+        row2tip = ttk.Frame(frame_top)
+        row2tip.pack(fill="x", pady=(2, 0))
+        ttk.Label(row2tip, text="建议先按 1 个月范围并显示浏览器进行爬取试验,再逐步扩大范围。",
+                  foreground="gray", font=("", 9)).pack(anchor="w")
+
         # 任务参数区: 常用选项(下载图片/视频、导出格式、跳过已爬取、无头模式)
         row2b = ttk.Frame(frame_top)
         row2b.pack(fill="x", pady=(8, 0))

@@ -1554,17 +1554,6 @@ def run_task(user_id, user_name, start_date, end_date,
     if not data_root:
         data_root = os.path.join(app_dir(), "DataPC")
 
-    # 跨月提示:建议按 1 个月爬取(路线图要求)
-    try:
-        d_start = datetime.strptime(start_date, "%Y-%m-%d")
-        d_end = datetime.strptime(end_date, "%Y-%m-%d")
-        if (d_end.year * 12 + d_end.month) - (d_start.year * 12 + d_start.month) > 1:
-            logger.warning(
-                "提示:您选择的时间范围超过 1 个月。为避免被微博风控和长时间等待,"
-                "建议先按 1 个月爬取试验,再逐步扩大范围。")
-    except Exception:
-        pass
-
     # 间隔过短提示(路线图要求)
     if min_interval < 2:
         logger.warning("提示:爬取间隔过短(<2秒)可能触发微博风控,建议设置 3 秒以上。")
