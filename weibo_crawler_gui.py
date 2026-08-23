@@ -92,6 +92,8 @@ class WeiboCrawlerGUI:
         self.settings = self._load_settings()
 
         self._build_ui()
+        # 应用上次保存的设置(日期等);首次使用保持为空
+        self._apply_settings()
 
         # 日志 handler
         ensure_logger()
@@ -105,7 +107,7 @@ class WeiboCrawlerGUI:
         # 窗口关闭时清理
         root.protocol("WM_DELETE_WINDOW", self._on_close)
 
-    # ---------- 设置持久化(记住上次选择的日期等) ----------
+    # ---------- 设置持久化(记住上次所有设置) ----------
 
     def _settings_path(self):
         """设置文件路径:与程序同目录(exe 版在 exe 旁,源码版在脚本旁)"""
@@ -120,21 +122,63 @@ class WeiboCrawlerGUI:
         except Exception:
             return {}
 
+    def _collect_settings(self):
+        """收集当前界面所有设置项(保存用)"""
+        data = {
+            # 任务参数
+            "name": self.var_name.get(),
+            "uid": self.var_uid.get(),
+            # 日期
+            "start_year": self.var_start_year.get(),
+            "start_month": self.var_start_month.get(),
+            "start_day": self.var_start_day.get(),
+            "end_year": self.var_end_year.get(),
+            "end_month": self.var_end_month.get(),
+            "end_day": self.var_end_day.get(),
+            # 高级设置
+            "headless": self.var_headless.get(),
+            "userdata": self.var_userdata.get(),
+            "keep_browser": self.var_keep_browser.get(),
+            "skip_export": self.var_skip_export.get(),
+            "min_interval": self.var_min_interval.get(),
+            "max_interval": self.var_max_interval.get(),
+            "download_images": self.var_download_images.get(),
+            "download_videos": self.var_download_videos.get(),
+            "export_format": self.var_export_format.get(),
+        }
+        # 类名覆盖
+        for key, var in self.class_vars.items():
+            data[f"class_{key}"] = var.get()
+        return data
+
     def _save_settings(self):
-        """保存当前设置(日期等)到文件"""
+        """保存当前所有设置到文件"""
         try:
-            data = {
-                "start_year": self.var_start_year.get(),
-                "start_month": self.var_start_month.get(),
-                "start_day": self.var_start_day.get(),
-                "end_year": self.var_end_year.get(),
-                "end_month": self.var_end_month.get(),
-                "end_day": self.var_end_day.get(),
-            }
             with open(self._settings_path(), "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
+                json.dump(self._collect_settings(), f, ensure_ascii=False, indent=2)
         except Exception as e:
             logger.warning(f"保存设置失败: {e}")
+
+    def _apply_settings(self):
+        """将已加载的设置应用到界面控件(在 _build_ui 之后调用)"""
+        st = self.settings
+        if not st:
+            return
+        self.var_name.set(st.get("name", self.var_name.get()))
+        self.var_uid.set(st.get("uid", self.var_uid.get()))
+        self.var_headless.set(bool(st.get("headless", False)))
+        self.var_userdata.set(st.get("userdata", self.var_userdata.get()))
+        self.var_keep_browser.set(bool(st.get("keep_browser", False)))
+        self.var_skip_export.set(bool(st.get("skip_export", False)))
+        self.var_min_interval.set(st.get("min_interval", self.var_min_interval.get()))
+        self.var_max_interval.set(st.get("max_interval", self.var_max_interval.get()))
+        self.var_download_images.set(bool(st.get("download_images", False)))
+        self.var_download_videos.set(bool(st.get("download_videos", False)))
+        self.var_export_format.set(st.get("export_format", self.var_export_format.get()))
+        for key, var in self.class_vars.items():
+            val = st.get(f"class_{key}", "")
+            if val:
+                var.set(val)
 
     # ---------- UI 构建 ----------
 
