@@ -182,11 +182,57 @@ class WeiboCrawlerGUI:
 
     # ---------- UI 构建 ----------
 
+    @staticmethod
+    def _year_options():
+        """年份选项: 10 年前 ~ 明年(动态,跨年后自动包含新年份)"""
+        now = datetime.now()
+        return [str(y) for y in range(now.year - 10, now.year + 2)]
+
+    def _build_date_picker(self, parent, year_var, month_var, day_var, _unused=None):
+        """构建年/月/日选择器;年份可手动输入(10年前~明年),月/日下拉"""
+        years = self._year_options()
+        months = [f"{m:02d}" for m in range(1, 13)]
+        y_cb = ttk.Combobox(parent, textvariable=year_var, values=years,
+                            width=6)  # 不设 readonly,允许手动输入任意年份
+        y_cb.pack(side="left")
+        ttk.Label(parent, text="年").pack(side="left")
+        m_cb = ttk.Combobox(parent, textvariable=month_var, values=months,
+                            width=4, state="readonly")
+        m_cb.pack(side="left")
+        ttk.Label(parent, text="月").pack(side="left")
+        d_cb = ttk.Combobox(parent, textvariable=day_var,
+                            width=4, state="readonly")
+        d_cb.pack(side="left")
+        ttk.Label(parent, text="日").pack(side="left", padx=(0, 4))
+        # 年月变化时刷新日选项
+        m_cb.bind("<<ComboboxSelected>>", lambda e: self._refresh_day_options(
+            year_var, month_var, day_var, d_cb))
+        y_cb.bind("<<ComboboxSelected>>", lambda e: self._refresh_day_options(
+            year_var, month_var, day_var, d_cb))
+        y_cb.bind("<FocusOut>", lambda e: self._refresh_day_options(
+            year_var, month_var, day_var, d_cb))
+        year_var.trace_add("write", lambda *a: self._refresh_day_options(
+            year_var, month_var, day_var, d_cb))
+        self._refresh_day_options(year_var, month_var, day_var, d_cb)
+        return d_cb
+
     def _build_ui(self):
         pad = {"padx": 8, "pady": 4}
 
+        # 主容器: Notebook 双页签(爬取 / 筛选)
+        self.notebook = ttk.Notebook(self.root)
+        self.notebook.pack(fill="both", expand=True, padx=10, pady=(10, 0))
+
+        self.tab_crawl = ttk.Frame(self.notebook)
+        self.tab_filter = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab_crawl, text="  爬取  ")
+        self.notebook.add(self.tab_filter, text="  筛选  ")
+
+        # ============ 页签1: 爬取 ============
+        t = self.tab_crawl
+
         # 顶部:参数输入
-        frame_top = ttk.LabelFrame(self.root, text="任务参数", padding=10)
+        frame_top = ttk.LabelFrame(t, text="任务参数", padding=10)
         frame_top.pack(fill="x", padx=10, pady=(10, 4))
 
         row1 = ttk.Frame(frame_top)
@@ -201,63 +247,23 @@ class WeiboCrawlerGUI:
         row2 = ttk.Frame(frame_top)
         row2.pack(fill="x", pady=(8, 0))
         ttk.Label(row2, text="开始日期:").pack(side="left")
-
-        # 日期选择器:年/月/日下拉框,自动处理每月天数(大小月/闰年)
-        # 初始值:优先读取上次保存的设置;首次使用则为空,由用户自行选择
-        now = datetime.now()
-        years = [str(y) for y in range(now.year - 3, now.year + 1)]
-        months = [f"{m:02d}" for m in range(1, 13)]
         st = self.settings
-
         self.var_start_year = tk.StringVar(value=st.get("start_year", ""))
         self.var_start_month = tk.StringVar(value=st.get("start_month", ""))
         self.var_start_day = tk.StringVar(value=st.get("start_day", ""))
-        ttk.Combobox(row2, textvariable=self.var_start_year, values=years,
-                     width=6, state="readonly").pack(side="left")
-        ttk.Label(row2, text="年").pack(side="left")
-        start_month_cb = ttk.Combobox(row2, textvariable=self.var_start_month, values=months,
-                                      width=4, state="readonly")
-        start_month_cb.pack(side="left")
-        ttk.Label(row2, text="月").pack(side="left")
-        self.start_day_cb = ttk.Combobox(row2, textvariable=self.var_start_day,
-                                         width=4, state="readonly")
-        self.start_day_cb.pack(side="left")
-        ttk.Label(row2, text="日", foreground="gray").pack(side="left", padx=(0, 20))
-
-        ttk.Label(row2, text="结束日期:").pack(side="left")
+        self._build_date_picker(row2, self.var_start_year, self.var_start_month,
+                                self.var_start_day, None)
+        ttk.Label(row2, text="  结束日期:").pack(side="left")
         self.var_end_year = tk.StringVar(value=st.get("end_year", ""))
         self.var_end_month = tk.StringVar(value=st.get("end_month", ""))
         self.var_end_day = tk.StringVar(value=st.get("end_day", ""))
-        ttk.Combobox(row2, textvariable=self.var_end_year, values=years,
-                     width=6, state="readonly").pack(side="left")
-        ttk.Label(row2, text="年").pack(side="left")
-        end_month_cb = ttk.Combobox(row2, textvariable=self.var_end_month, values=months,
-                                    width=4, state="readonly")
-        end_month_cb.pack(side="left")
-        ttk.Label(row2, text="月").pack(side="left")
-        self.end_day_cb = ttk.Combobox(row2, textvariable=self.var_end_day,
-                                       width=4, state="readonly")
-        self.end_day_cb.pack(side="left")
-        ttk.Label(row2, text="日").pack(side="left")
-        ttk.Label(row2, text="  (日的选项随年月自动调整)",
+        self._build_date_picker(row2, self.var_end_year, self.var_end_month,
+                                self.var_end_day, None)
+        ttk.Label(row2, text="  (年份可手动输入,日随年月自动调整)",
                   foreground="gray").pack(side="left", padx=6)
 
-        # 初始化日的选项,并在年/月变化时刷新
-        self._refresh_day_options(self.var_start_year, self.var_start_month,
-                                  self.var_start_day, self.start_day_cb)
-        self._refresh_day_options(self.var_end_year, self.var_end_month,
-                                  self.var_end_day, self.end_day_cb)
-        start_month_cb.bind("<<ComboboxSelected>>", lambda e: self._refresh_day_options(
-            self.var_start_year, self.var_start_month, self.var_start_day, self.start_day_cb))
-        self.var_start_year.trace_add("write", lambda *a: self._refresh_day_options(
-            self.var_start_year, self.var_start_month, self.var_start_day, self.start_day_cb))
-        end_month_cb.bind("<<ComboboxSelected>>", lambda e: self._refresh_day_options(
-            self.var_end_year, self.var_end_month, self.var_end_day, self.end_day_cb))
-        self.var_end_year.trace_add("write", lambda *a: self._refresh_day_options(
-            self.var_end_year, self.var_end_month, self.var_end_day, self.end_day_cb))
-
         # 高级设置
-        frame_adv = ttk.LabelFrame(self.root, text="高级设置", padding=10)
+        frame_adv = ttk.LabelFrame(t, text="高级设置", padding=10)
         frame_adv.pack(fill="x", padx=10, pady=4)
 
         row3 = ttk.Frame(frame_adv)
@@ -275,7 +281,7 @@ class WeiboCrawlerGUI:
         self.var_skip_export = tk.BooleanVar(value=False)
         ttk.Checkbutton(row4, text="只收集ID不导出MD", variable=self.var_skip_export).pack(side="left", padx=10)
 
-        # 路线图更新1: 爬取间隔可自定义
+        # 爬取间隔可自定义
         row4b = ttk.Frame(frame_adv)
         row4b.pack(fill="x", pady=(6, 0))
         ttk.Label(row4b, text="爬取间隔(秒):").pack(side="left")
@@ -289,7 +295,7 @@ class WeiboCrawlerGUI:
         ttk.Label(row4b, text="秒  (提示:勿设置过短,避免触发风控)",
                   foreground="gray").pack(side="left", padx=6)
 
-        # 路线图更新3/4: 图片视频下载 + 导出格式
+        # 图片视频下载 + 导出格式
         row4c = ttk.Frame(frame_adv)
         row4c.pack(fill="x", pady=(6, 0))
         self.var_download_images = tk.BooleanVar(value=False)
@@ -319,7 +325,7 @@ class WeiboCrawlerGUI:
             self.class_vars[key] = var
 
         # 控制按钮
-        frame_btn = ttk.Frame(self.root)
+        frame_btn = ttk.Frame(t)
         frame_btn.pack(fill="x", padx=10, pady=6)
         self.btn_start = ttk.Button(frame_btn, text="开始爬取", command=self._start)
         self.btn_start.pack(side="left")
@@ -328,11 +334,93 @@ class WeiboCrawlerGUI:
         self.lbl_status = ttk.Label(frame_btn, text="就绪", foreground="green")
         self.lbl_status.pack(side="left", padx=12)
 
-        # 日志区
+        # ============ 页签2: 筛选 ============
+        f = self.tab_filter
+        frame_f1 = ttk.LabelFrame(f, text="筛选条件", padding=10)
+        frame_f1.pack(fill="x", padx=10, pady=(10, 4))
+
+        frow1 = ttk.Frame(frame_f1)
+        frow1.pack(fill="x")
+        ttk.Label(frow1, text="博主昵称:").pack(side="left")
+        self.f_var_name = tk.StringVar(value="卢诗翰")
+        ttk.Entry(frow1, textvariable=self.f_var_name, width=18).pack(side="left", padx=(4, 20))
+        ttk.Label(frow1, text="微博ID:").pack(side="left")
+        self.f_var_uid = tk.StringVar(value="3276099007")
+        ttk.Entry(frow1, textvariable=self.f_var_uid, width=18).pack(side="left", padx=4)
+        ttk.Button(frow1, text="刷新博主列表", command=self._refresh_bloggers).pack(side="left", padx=8)
+        self.f_lbl_bloggers = ttk.Label(frow1, text="", foreground="gray")
+        self.f_lbl_bloggers.pack(side="left")
+        self._refresh_bloggers()
+
+        frow2 = ttk.Frame(frame_f1)
+        frow2.pack(fill="x", pady=(8, 0))
+        ttk.Label(frow2, text="开始日期:").pack(side="left")
+        self.f_var_start_year = tk.StringVar(value="")
+        self.f_var_start_month = tk.StringVar(value="")
+        self.f_var_start_day = tk.StringVar(value="")
+        self._build_date_picker(frow2, self.f_var_start_year, self.f_var_start_month,
+                                self.f_var_start_day, None)
+        ttk.Label(frow2, text="  结束日期:").pack(side="left")
+        self.f_var_end_year = tk.StringVar(value="")
+        self.f_var_end_month = tk.StringVar(value="")
+        self.f_var_end_day = tk.StringVar(value="")
+        self._build_date_picker(frow2, self.f_var_end_year, self.f_var_end_month,
+                                self.f_var_end_day, None)
+
+        frow3 = ttk.Frame(frame_f1)
+        frow3.pack(fill="x", pady=(8, 0))
+        ttk.Label(frow3, text="排序指标(可多选):").pack(side="left")
+        self.f_var_use_repost = tk.BooleanVar(value=True)
+        ttk.Checkbutton(frow3, text="转发", variable=self.f_var_use_repost).pack(side="left", padx=(6, 0))
+        self.f_var_use_comment = tk.BooleanVar(value=True)
+        ttk.Checkbutton(frow3, text="评论", variable=self.f_var_use_comment).pack(side="left", padx=6)
+        self.f_var_use_like = tk.BooleanVar(value=True)
+        ttk.Checkbutton(frow3, text="点赞", variable=self.f_var_use_like).pack(side="left", padx=6)
+        ttk.Label(frow3, text="  输出篇数:").pack(side="left", padx=(16, 0))
+        self.f_var_top = tk.StringVar(value="10")
+        ttk.Spinbox(frow3, from_=1, to=500, textvariable=self.f_var_top,
+                    width=5).pack(side="left", padx=4)
+        ttk.Label(frow3, text="篇").pack(side="left")
+
+        frow4 = ttk.Frame(frame_f1)
+        frow4.pack(fill="x", pady=(8, 0))
+        ttk.Label(frow4, text="数据格式:").pack(side="left")
+        self.f_var_format = tk.StringVar(value="md")
+        ttk.Combobox(frow4, textvariable=self.f_var_format, values=["md", "docx"],
+                     width=6, state="readonly").pack(side="left", padx=4)
+        self.f_var_move = tk.BooleanVar(value=False)
+        ttk.Checkbutton(frow4, text="移动原文件(默认复制)", variable=self.f_var_move).pack(side="left", padx=16)
+        self.f_var_filter_root = tk.StringVar(value="筛选")
+        ttk.Label(frow4, text="输出文件夹:").pack(side="left", padx=(16, 0))
+        ttk.Entry(frow4, textvariable=self.f_var_filter_root, width=14).pack(side="left", padx=4)
+        ttk.Label(frow4, text="(在程序目录下)", foreground="gray").pack(side="left")
+
+        frame_fbtn = ttk.Frame(f)
+        frame_fbtn.pack(fill="x", padx=10, pady=8)
+        self.btn_filter = ttk.Button(frame_fbtn, text="开始筛选", command=self._start_filter)
+        self.btn_filter.pack(side="left")
+        ttk.Label(frame_fbtn, text=" 说明: 对本地已爬取数据按所选指标之和排序,取前N篇复制到“筛选”文件夹,文件名加排名序号",
+                  foreground="gray").pack(side="left", padx=8)
+
+        # ============ 日志区(两个页签共用) ============
         frame_log = ttk.LabelFrame(self.root, text="运行日志", padding=6)
         frame_log.pack(fill="both", expand=True, padx=10, pady=(0, 10))
         self.txt_log = scrolledtext.ScrolledText(frame_log, height=14, state="disabled", wrap="word")
         self.txt_log.pack(fill="both", expand=True)
+
+    def _refresh_bloggers(self):
+        """刷新筛选页的博主列表提示"""
+        try:
+            from weibo_crawler_core import ArticleFilter
+            af = ArticleFilter()  # 默认使用程序目录下 DataPC
+            bloggers = af.list_bloggers()
+            if bloggers:
+                self.f_lbl_bloggers.configure(
+                    text="本地已有: " + "、".join(f"{n}({i})" for n, i in bloggers))
+            else:
+                self.f_lbl_bloggers.configure(text="本地暂无已爬取数据", foreground="gray")
+        except Exception as e:
+            logger.warning(f"刷新博主列表失败: {e}")
 
     # ---------- 日志与队列 ----------
 
@@ -564,6 +652,80 @@ class WeiboCrawlerGUI:
         except Exception as e:
             logger.error(f"任务异常: {e}", exc_info=True)
             self.root.after(0, self._on_finish, f"\n任务异常终止: {e}")
+
+    # ---------- 筛选 ----------
+
+    def _start_filter(self):
+        """筛选页: 对本地数据按转评赞筛选"""
+        name = self.f_var_name.get().strip()
+        uid = self.f_var_uid.get().strip()
+        try:
+            start = (f"{int(self.f_var_start_year.get()):04d}-"
+                     f"{int(self.f_var_start_month.get()):02d}-"
+                     f"{int(self.f_var_start_day.get()):02d}")
+            end = (f"{int(self.f_var_end_year.get()):04d}-"
+                   f"{int(self.f_var_end_month.get()):02d}-"
+                   f"{int(self.f_var_end_day.get()):02d}")
+        except (ValueError, TypeError):
+            messagebox.showwarning("日期错误", "请选择有效的筛选开始/结束日期")
+            return
+        try:
+            top_n = int(self.f_var_top.get())
+            if top_n < 1:
+                raise ValueError
+        except ValueError:
+            messagebox.showwarning("篇数错误", "输出篇数应为正整数")
+            return
+
+        self._append_log("=" * 60)
+        self._append_log(f"开始筛选: 博主={name}({uid}), 时间={start} ~ {end}, "
+                         f"前{top_n}篇")
+        self.btn_filter.configure(state="disabled")
+
+        kwargs = {
+            "user_name": name,
+            "user_id": uid,
+            "start_date": start,
+            "end_date": end,
+            "top_n": top_n,
+            "use_repost": self.f_var_use_repost.get(),
+            "use_comment": self.f_var_use_comment.get(),
+            "use_like": self.f_var_use_like.get(),
+            "source_format": self.f_var_format.get(),
+            "move": self.f_var_move.get(),
+            "filter_root": self.f_var_filter_root.get().strip() or os.path.join(app_dir(), "筛选"),
+        }
+        t = threading.Thread(target=self._run_filter_worker, args=(kwargs,), daemon=True)
+        t.start()
+
+    def _run_filter_worker(self, kwargs):
+        try:
+            from weibo_crawler_core import ArticleFilter
+            af = ArticleFilter(filter_root=kwargs["filter_root"])
+            result = af.filter_top(
+                kwargs["user_name"], kwargs["user_id"],
+                kwargs["start_date"], kwargs["end_date"],
+                top_n=kwargs["top_n"],
+                use_repost=kwargs["use_repost"],
+                use_comment=kwargs["use_comment"],
+                use_like=kwargs["use_like"],
+                source_format=kwargs["source_format"],
+                move=kwargs["move"],
+            )
+            if result["output_dir"]:
+                msg = (f"\n筛选完成: 共 {len(result['items'])} 篇\n"
+                       f"输出目录: {result['output_dir']}\n"
+                       f"统计明细: 目录内'筛选说明.txt'")
+            else:
+                msg = "\n筛选未完成: 未找到符合条件的文件,请检查博主/日期/格式"
+            self.root.after(0, self._on_filter_finish, msg)
+        except Exception as e:
+            logger.error(f"筛选异常: {e}", exc_info=True)
+            self.root.after(0, self._on_filter_finish, f"\n筛选异常终止: {e}")
+
+    def _on_filter_finish(self, msg):
+        self._append_log(msg)
+        self.btn_filter.configure(state="normal")
 
     def _on_finish(self, msg):
         self._append_log(msg)

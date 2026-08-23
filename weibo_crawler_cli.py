@@ -3,26 +3,16 @@
 """
 微博爬虫 - 命令行入口
 =====================
-用法示例:
-  # 全参数指定
-  python weibo_crawler_cli.py --name 卢诗翰 --uid 3276099007 --start 2026-04-01 --end 2026-04-30
+用法示例(爬取):
+  python weibo_crawler_cli.py crawl --name 卢诗翰 --uid 3276099007 --start 2026-04-01 --end 2026-04-30
+  python weibo_crawler_cli.py crawl --name 卢诗翰 --uid 3276099007 --start 2026-04-01 --end 2026-04-30 --no-export
+  python weibo_crawler_cli.py crawl --name 卢诗翰 --uid 3276099007 --start 2026-04-01 --end 2026-04-30 --headless
+  # 不带参数直接运行 -> 交互式提问(默认爬取)
 
-  # 只收集微博ID,不导出Markdown
-  python weibo_crawler_cli.py --name 卢诗翰 --uid 3276099007 --start 2026-04-01 --end 2026-04-30 --no-export
-
-  # 使用无头模式 + 手动指定卡片类名(跳过自动探测)
-  python weibo_crawler_cli.py --name 卢诗翰 --uid 3276099007 --start 2026-04-01 --end 2026-04-30 --headless --card-class _body_ecgcn_63
-
-  # 不带参数直接运行 -> 交互式提问
-  python weibo_crawler_cli.py
-
-可选参数(类名覆盖,用于自动探测失败时手动指定):
-  --card-class     微博卡片类名(如 _body_ecgcn_63)
-  --time-class     时间链接类名(如 _time_1tpft_33)
-  --name-class     用户名类名(如 _name_1yc79_291)
-  --content-class  正文类名(如 _wbtext_q1l14_14)
-  --wrap-class     转评赞容器类名(如 _wrap_198pe_137)
-  --num-class      转评赞数字类名(如 _num_198pe_46)
+用法示例(筛选本地已爬取数据):
+  python weibo_crawler_cli.py filter --name 卢诗翰 --uid 3276099007 --start 2025-01-01 --end 2025-06-30 --top 10
+  python weibo_crawler_cli.py filter --name 卢诗翰 --uid 3276099007 --start 2026-01-01 --end 2026-07-31 --top 5 --no-repost
+  # 可选: --format docx(筛选docx文件) --move(移动而非复制) --filter-root 自定义输出目录
 """
 
 import argparse
@@ -33,7 +23,7 @@ from datetime import datetime
 
 from weibo_crawler_core import (
     ensure_logger, ClassNameManager, WeiboPCCrawler, run_task,
-    resource_path, app_dir,
+    resource_path, app_dir, ArticleFilter,
 )
 
 logger = logging.getLogger('weibo_crawler')
@@ -48,43 +38,55 @@ def parse_args():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    parser.add_argument("--name", help="博主昵称,如: 卢诗翰")
-    parser.add_argument("--uid", help="博主微博ID,如: 3276099007")
-    parser.add_argument("--start", help="开始日期 YYYY-MM-DD,如 2026-04-01")
-    parser.add_argument("--end", help="结束日期 YYYY-MM-DD,如 2026-04-30")
+    sub = parser.add_subparsers(dest="command", help="子命令")
 
-    parser.add_argument("--user-data-dir", default=DEFAULT_USER_DATA_DIR,
-                        help=f"Edge用户数据目录(复用登录态),默认: {DEFAULT_USER_DATA_DIR}")
-    parser.add_argument("--headless", action="store_true", help="无头模式(不显示浏览器窗口)")
-    parser.add_argument("--max-count", type=int, default=500, help="最大微博数量,默认500")
-    parser.add_argument("--keyword", default="", help="搜索关键词,默认空")
-    parser.add_argument("--no-export", action="store_true", help="只收集微博ID,不导出Markdown")
-    parser.add_argument("--keep-browser", action="store_true", help="完成后保留浏览器窗口")
-    parser.add_argument("--data-root", default="DataPC", help="数据输出根目录,默认DataPC")
+    # ---- 爬取子命令 ----
+    p_crawl = sub.add_parser("crawl", help="爬取微博并导出(默认)")
+    p_crawl.add_argument("--name", help="博主昵称,如: 卢诗翰")
+    p_crawl.add_argument("--uid", help="博主微博ID,如: 3276099007")
+    p_crawl.add_argument("--start", help="开始日期 YYYY-MM-DD,如 2026-04-01")
+    p_crawl.add_argument("--end", help="结束日期 YYYY-MM-DD,如 2026-04-30")
+    p_crawl.add_argument("--user-data-dir", default=DEFAULT_USER_DATA_DIR,
+                         help=f"Edge用户数据目录(复用登录态),默认: {DEFAULT_USER_DATA_DIR}")
+    p_crawl.add_argument("--headless", action="store_true", help="无头模式(不显示浏览器窗口)")
+    p_crawl.add_argument("--max-count", type=int, default=500, help="最大微博数量,默认500")
+    p_crawl.add_argument("--keyword", default="", help="搜索关键词,默认空")
+    p_crawl.add_argument("--no-export", action="store_true", help="只收集微博ID,不导出Markdown")
+    p_crawl.add_argument("--keep-browser", action="store_true", help="完成后保留浏览器窗口")
+    p_crawl.add_argument("--data-root", default=None, help="数据输出根目录,默认程序目录下DataPC")
+    p_crawl.add_argument("--min-interval", type=int, default=3,
+                         help="每条微博之间最小等待秒数,默认3(勿设置过短,避免风控)")
+    p_crawl.add_argument("--max-interval", type=int, default=8,
+                         help="每条微博之间最大等待秒数,默认8")
+    p_crawl.add_argument("--download-images", action="store_true",
+                         help="同时下载微博中的图片到本地")
+    p_crawl.add_argument("--download-videos", action="store_true",
+                         help="同时下载微博中的视频到本地")
+    p_crawl.add_argument("--format", dest="export_format", default="md",
+                         choices=["md", "docx"], help="导出格式,默认md(支持docx)")
+    p_crawl.add_argument("--card-class", dest="card_class", help="微博卡片类名(覆盖)")
+    p_crawl.add_argument("--time-class", dest="time_class", help="时间链接类名(覆盖)")
+    p_crawl.add_argument("--name-class", dest="name_class", help="用户名类名(覆盖)")
+    p_crawl.add_argument("--content-class", dest="content_class", help="正文类名(覆盖)")
+    p_crawl.add_argument("--wrap-class", dest="wrap_class", help="转评赞容器类名(覆盖)")
+    p_crawl.add_argument("--num-class", dest="num_class", help="转评赞数字类名(覆盖)")
+    p_crawl.set_defaults(command="crawl")
 
-    # 路线图更新1: 爬取间隔可自定义
-    parser.add_argument("--min-interval", type=int, default=3,
-                        help="每条微博之间最小等待秒数,默认3(勿设置过短,避免风控)")
-    parser.add_argument("--max-interval", type=int, default=8,
-                        help="每条微博之间最大等待秒数,默认8")
-
-    # 路线图更新3: 是否下载图片/视频
-    parser.add_argument("--download-images", action="store_true",
-                        help="同时下载微博中的图片到本地")
-    parser.add_argument("--download-videos", action="store_true",
-                        help="同时下载微博中的视频到本地")
-
-    # 路线图更新4: 导出格式
-    parser.add_argument("--format", dest="export_format", default="md",
-                        choices=["md", "docx"], help="导出格式,默认md(支持docx)")
-
-    # 类名覆盖参数(自动探测失败时手动指定)
-    parser.add_argument("--card-class", dest="card_class", help="微博卡片类名(覆盖)")
-    parser.add_argument("--time-class", dest="time_class", help="时间链接类名(覆盖)")
-    parser.add_argument("--name-class", dest="name_class", help="用户名类名(覆盖)")
-    parser.add_argument("--content-class", dest="content_class", help="正文类名(覆盖)")
-    parser.add_argument("--wrap-class", dest="wrap_class", help="转评赞容器类名(覆盖)")
-    parser.add_argument("--num-class", dest="num_class", help="转评赞数字类名(覆盖)")
+    # ---- 筛选子命令 ----
+    p_filter = sub.add_parser("filter", help="对本地已爬取数据按转评赞筛选排序")
+    p_filter.add_argument("--name", help="博主昵称,如: 卢诗翰")
+    p_filter.add_argument("--uid", help="博主微博ID,如: 3276099007")
+    p_filter.add_argument("--start", help="开始日期 YYYY-MM-DD,如 2026-01-01")
+    p_filter.add_argument("--end", help="结束日期 YYYY-MM-DD,如 2026-06-30")
+    p_filter.add_argument("--top", type=int, default=10, help="输出篇数,默认10")
+    p_filter.add_argument("--no-repost", action="store_true", help="不计入转发数")
+    p_filter.add_argument("--no-comment", action="store_true", help="不计入评论数")
+    p_filter.add_argument("--no-like", action="store_true", help="不计入点赞数")
+    p_filter.add_argument("--format", dest="source_format", default="md",
+                          choices=["md", "docx"], help="筛选的数据文件格式,默认md")
+    p_filter.add_argument("--move", action="store_true", help="移动而非复制原文件")
+    p_filter.add_argument("--data-root", default=None, help="数据根目录,默认程序目录下DataPC")
+    p_filter.add_argument("--filter-root", default="筛选", help="筛选输出根目录,默认同目录下'筛选'")
     return parser.parse_args()
 
 
@@ -141,11 +143,8 @@ def apply_class_overrides(args, class_manager):
         class_manager.save()
 
 
-def main():
-    ensure_logger()
-    args = parse_args()
-
-    # 参数收集:有缺省时交互式提问
+def cmd_crawl(args):
+    """爬取子命令: 收集微博并导出"""
     user_name = args.name
     user_id = args.uid
     start_date = args.start
@@ -160,7 +159,6 @@ def main():
         start_date = interactive_input("开始日期(YYYY-MM-DD)", start_date)
         end_date = interactive_input("结束日期(YYYY-MM-DD)", end_date or today)
 
-    # 简单校验日期格式
     for d in (start_date, end_date):
         try:
             datetime.strptime(d, "%Y-%m-%d")
@@ -171,19 +169,15 @@ def main():
     logger.info(f"任务参数: 博主={user_name}({user_id}), 时间={start_date} ~ {end_date}")
     logger.info(f"用户数据目录: {args.user_data_dir}")
 
-    # 手动输入回调(自动探测失败时触发)
     def manual_cb(key, current):
         return manual_callback_cli(key, current)
 
-    # 等待用户操作回调(如手动登录后继续)
     def wait_cb(message):
         input(f"{message}\n完成后按回车继续...")
 
-    # 类名管理器(先应用命令行覆盖)
     cm = ClassNameManager(manual_callback=manual_cb)
     apply_class_overrides(args, cm)
 
-    # 运行任务
     result = run_task(
         user_id=user_id,
         user_name=user_name,
@@ -205,7 +199,6 @@ def main():
         export_format=args.export_format,
     )
 
-    # 结果输出
     print()
     print("=" * 60)
     print("任务完成,结果汇总:")
@@ -220,6 +213,67 @@ def main():
         print(f"  MD目录: {result['md_dir']}")
         print(f"  导出成功: {result['exported']} 条, 失败: {result['failed']} 条")
     print("=" * 60)
+
+
+def cmd_filter(args):
+    """筛选子命令: 对本地已爬取数据按转评赞之和排序筛选"""
+    user_name = args.name
+    user_id = args.uid
+    start_date = args.start
+    end_date = args.end
+
+    if not (user_id and start_date and end_date):
+        print()
+        print("进入交互模式(筛选):")
+        af = ArticleFilter(data_root=args.data_root, filter_root=args.filter_root)
+        bloggers = af.list_bloggers()
+        if bloggers:
+            print("DataPC 中已有的博主:")
+            for nm, uid in bloggers:
+                print(f"  {nm} ({uid})")
+        user_name = interactive_input("博主昵称", user_name or (bloggers[0][0] if bloggers else ""))
+        user_id = interactive_input("博主微博ID", user_id or (bloggers[0][1] if bloggers else ""))
+        start_date = interactive_input("开始日期(YYYY-MM-DD)", start_date)
+        end_date = interactive_input("结束日期(YYYY-MM-DD)", end_date)
+
+    for d in (start_date, end_date):
+        try:
+            datetime.strptime(d, "%Y-%m-%d")
+        except ValueError:
+            logger.error(f"日期格式错误: {d},应为 YYYY-MM-DD")
+            sys.exit(1)
+
+    logger.info(f"筛选参数: 博主={user_name}({user_id}), 时间={start_date} ~ {end_date}, "
+                f"篇数={args.top}, 格式={args.source_format}")
+
+    af = ArticleFilter(data_root=args.data_root, filter_root=args.filter_root)
+    result = af.filter_top(
+        user_name, user_id, start_date, end_date,
+        top_n=args.top,
+        use_repost=not args.no_repost,
+        use_comment=not args.no_comment,
+        use_like=not args.no_like,
+        source_format=args.source_format,
+        move=args.move,
+    )
+    print()
+    print("=" * 60)
+    if result["output_dir"]:
+        print(f"筛选完成,共 {len(result['items'])} 篇,输出到:")
+        print(f"  {result['output_dir']}")
+        print("文件名已按排名添加序号前缀,统计明细见文件夹内'筛选说明.txt'")
+    else:
+        print("筛选未完成(未找到符合条件的文件),请检查博主/日期/格式是否正确")
+    print("=" * 60)
+
+
+def main():
+    ensure_logger()
+    args = parse_args()
+    if args.command == "filter":
+        cmd_filter(args)
+    else:
+        cmd_crawl(args)
 
 
 if __name__ == "__main__":

@@ -27,6 +27,7 @@ import json
 import time
 import logging
 import random
+import shutil
 import urllib.parse
 from datetime import datetime, timedelta
 
@@ -1608,6 +1609,265 @@ def run_task(user_id, user_name, start_date, end_date,
             crawler.close(force_close=True)
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# 筛选功能:对本地已爬取的数据文件按转评赞之和排序筛选
+# ---------------------------------------------------------------------------
+
+# 统计数字解析: 支持 "1.5万" / "3504.7万" / "123" / "1.2亿" 等微博常用格式
+_COUNT_RE = re.compile(r"([\d.]+)\s*(万|亿)?")
+
+
+def parse_count(text):
+    """解析微博统计数字,返回 int;解析失败返回 0"""
+    if not text:
+        return 0
+    m = _COUNT_RE.search(str(text).replace(",", "").strip())
+    if not m:
+        return 0
+    num = float(m.group(1))
+    unit = m.group(2) or ""
+    if unit == "万":
+        return int(num * 10000)
+    if unit == "亿":
+        return int(num * 100000000)
+    return int(num)
+
+
+class ArticleFilter:
+    """本地文章筛选器
+
+    扫描 DataPC/<博主>_<ID>/ 下各年份/月份文件夹中的 md/docx 文件,
+    解析每篇的转发/评论/点赞数,按(可勾选的)数量之和排序,
+    复制得分最高的前 N 篇到"筛选"文件夹,并按排名重命名。
+    """
+
+    STAT_KEYS = ("repost", "comment", "like")
+    STAT_LABELS = {"repost": "转发", "comment": "评论", "like": "点赞"}
+    # md 中的统计行: >转发数：331 / >评论数：225 / >点赞数：5084
+    MD_STAT_RE = re.compile(r">(转发数|评论数|点赞数)[:：]\s*([\d.,万亿]+)")
+
+    def __init__(self, data_root=None, filter_root="筛选"):
+        self.data_root = data_root or os.path.join(app_dir(), "DataPC")
+        self.filter_root = filter_root
+
+    # ---------- 扫描与解析 ----------
+
+    def list_bloggers(self):
+        """列出 DataPC 下已有的博主目录,返回 [(昵称, ID), ...](跳过空目录)"""
+        result = []
+        if not os.path.isdir(self.data_root):
+            return result
+        for name in sorted(os.listdir(self.data_root)):
+            m = re.match(r"^(.+)_(\d+)$", name)
+            p = os.path.join(self.data_root, name)
+            if m and os.path.isdir(p):
+                # 跳过空壳目录(如 get_username 失败创建的 unknown_ID)
+                n_files = sum(len(fs) for _, _, fs in os.walk(p))
+                if n_files > 0:
+                    result.append((m.group(1), m.group(2)))
+        return result
+
+    def _find_user_dir(self, user_id):
+        """在 DataPC 下查找指定 user_id 的数据目录
+
+        优先选择包含"年份年"子目录的目录(真正的数据目录);
+        若有多个匹配(如 unknown_ID 空壳),选内容最多的。
+        """
+        candidates = []
+        for name in os.listdir(self.data_root):
+            m = re.match(r"^(.+)_(\d+)$", name)
+            if m and m.group(2) == user_id:
+                p = os.path.join(self.data_root, name)
+                if os.path.isdir(p):
+                    candidates.append(p)
+        if not candidates:
+            return None
+        # 按"年份年"子目录数量 + 文件总数 排序,取最像数据目录的
+        def weight(p):
+            year_dirs = sum(1 for x in os.listdir(p)
+                            if os.path.isdir(os.path.join(p, x)) and x.endswith("年"))
+            n_files = sum(len(fs) for _, _, fs in os.walk(p))
+            return (year_dirs, n_files)
+        return max(candidates, key=weight)
+
+    def scan_files(self, user_id, start_date, end_date, source_format="md"):
+        """扫描指定博主、日期范围内、指定格式的文章文件
+
+        返回 [(file_path, file_date(datetime)), ...]
+        """
+        user_dir = self._find_user_dir(user_id)
+        if not user_dir:
+            return []
+
+        start = datetime.strptime(start_date, "%Y-%m-%d") if start_date else None
+        end = datetime.strptime(end_date, "%Y-%m-%d") if end_date else None
+        ext = ".docx" if source_format == "docx" else ".md"
+        found = []
+        for year_item in sorted(os.listdir(user_dir)):
+            year_path = os.path.join(user_dir, year_item)
+            if not (os.path.isdir(year_path) and year_item.endswith("年")):
+                continue
+            for month_item in sorted(os.listdir(year_path)):
+                month_path = os.path.join(year_path, month_item)
+                if not (os.path.isdir(month_path) and month_item.endswith("月")):
+                    continue
+                for f in os.listdir(month_path):
+                    if not f.endswith(ext):
+                        continue
+                    # 文件名含日期: <博主>_YY-M-D_<mid>.<ext>
+                    fm = re.search(r"_(\d{2,4})-(\d{1,2})-(\d{1,2})_", f)
+                    if not fm:
+                        continue
+                    year = int(fm.group(1))
+                    if year < 100:
+                        year += 2000
+                    fdate = datetime(year, int(fm.group(2)), int(fm.group(3)))
+                    if start and fdate < start:
+                        continue
+                    if end and fdate > end:
+                        continue
+                    found.append((os.path.join(month_path, f), fdate))
+        return found
+
+    # ---------- 统计解析 ----------
+
+    def read_stats(self, file_path):
+        """读取单个文件的转评赞,返回 (repost, comment, like)"""
+        repost = comment = like = 0
+        try:
+            if file_path.endswith(".md"):
+                with open(file_path, "r", encoding="utf-8") as f:
+                    text = f.read()
+                for label, key in (("转发数", "repost"), ("评论数", "comment"),
+                                   ("点赞数", "like")):
+                    m = re.search(rf">\s*{label}\s*[:：]\s*([\d.,万亿]+)", text)
+                    if m:
+                        val = parse_count(m.group(1))
+                        if key == "repost":
+                            repost = val
+                        elif key == "comment":
+                            comment = val
+                        else:
+                            like = val
+            elif file_path.endswith(".docx"):
+                from docx import Document
+                doc = Document(file_path)
+                for p in doc.paragraphs:
+                    t = p.text.strip()
+                    m = re.match(r"^(转发数|评论数|点赞数)[:：]\s*([\d.,万亿]+)$", t)
+                    if m:
+                        val = parse_count(m.group(2))
+                        if m.group(1) == "转发数":
+                            repost = val
+                        elif m.group(1) == "评论数":
+                            comment = val
+                        else:
+                            like = val
+        except Exception as e:
+            logger.warning(f"读取统计失败 {file_path}: {e}")
+        return repost, comment, like
+
+    # ---------- 主流程 ----------
+
+    def filter_top(self, user_name, user_id, start_date, end_date,
+                   top_n=10, use_repost=True, use_comment=True, use_like=True,
+                   source_format="md", move=False):
+        """按转评赞之和筛选前 N 篇,复制到"筛选"文件夹
+
+        返回 dict: {"output_dir", "items": [...], "skipped": [...]}
+        """
+        ensure_logger()
+        # 1. 扫描文件
+        files = self.scan_files(user_id, start_date, end_date, source_format)
+        if not files:
+            logger.warning(
+                f"在 {self.data_root} 中未找到博主 {user_name}({user_id}) "
+                f"{start_date} ~ {end_date} 的 {source_format} 文件")
+            return {"output_dir": None, "items": [], "skipped": []}
+
+        # 2. 解析统计并计算得分
+        records = []
+        for fpath, fdate in files:
+            repost, comment, like = self.read_stats(fpath)
+            score = 0
+            if use_repost:
+                score += repost
+            if use_comment:
+                score += comment
+            if use_like:
+                score += like
+            records.append({
+                "file": fpath, "date": fdate,
+                "repost": repost, "comment": comment, "like": like,
+                "score": score,
+            })
+
+        # 3. 排序取前 N(得分降序;同分按日期新->旧)
+        records.sort(key=lambda r: (-r["score"], -r["date"].timestamp()))
+        top = records[:top_n]
+
+        # 4. 创建输出文件夹: 筛选/<博主>_<起>~<止>_TOP<N>
+        os.makedirs(self.filter_root, exist_ok=True)
+        out_dir = os.path.join(
+            self.filter_root,
+            f"{user_name}_{start_date}~{end_date}_TOP{len(top)}")
+        os.makedirs(out_dir, exist_ok=True)
+
+        # 5. 复制/移动并重命名(序号前缀体现排名)
+        items = []
+        for idx, rec in enumerate(top, 1):
+            src = rec["file"]
+            base = os.path.basename(src)
+            name, ext = os.path.splitext(base)
+            # 序号_原始名_得分.ext,如 01_卢诗翰_26-4-7_xxx_8888.md
+            new_name = f"{idx:02d}_{name}_{rec['score']}{ext}"
+            dst = os.path.join(out_dir, new_name)
+            if move:
+                shutil.move(src, dst)
+            else:
+                shutil.copy2(src, dst)
+            rec["new_name"] = new_name
+            items.append(rec)
+
+        # 6. 生成统计说明文件
+        self._write_summary(out_dir, items, use_repost, use_comment, use_like,
+                            start_date, end_date, top_n)
+
+        logger.info(f"筛选完成: 共扫描 {len(records)} 篇, 输出前 {len(top)} 篇到 {out_dir}")
+        return {"output_dir": out_dir, "items": items, "skipped": []}
+
+    @staticmethod
+    def _write_summary(out_dir, items, use_repost, use_comment, use_like,
+                       start_date, end_date, top_n):
+        """在输出文件夹中生成 筛选说明.txt,列出排名与各项数据"""
+        labels = []
+        if use_repost:
+            labels.append("转发")
+        if use_comment:
+            labels.append("评论")
+        if use_like:
+            labels.append("点赞")
+        metric = "+".join(labels) if labels else "(未勾选任何指标)"
+
+        lines = [
+            f"筛选范围: {start_date} ~ {end_date}",
+            f"排序指标: {metric} 之和",
+            f"输出篇数: {min(top_n, len(items))}",
+            "",
+            "排名\t得分\t转发\t评论\t点赞\t文件名",
+        ]
+        for i, rec in enumerate(items, 1):
+            lines.append(
+                f"{i}\t{rec['score']}\t{rec['repost']}\t{rec['comment']}\t"
+                f"{rec['like']}\t{rec['new_name']}")
+        try:
+            with open(os.path.join(out_dir, "筛选说明.txt"),
+                      "w", encoding="utf-8") as f:
+                f.write("\n".join(lines))
+        except Exception as e:
+            logger.warning(f"写入筛选说明失败: {e}")
 
 
 if __name__ == "__main__":
