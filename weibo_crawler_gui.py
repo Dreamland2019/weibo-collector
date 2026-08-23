@@ -264,17 +264,37 @@ class WeiboCrawlerGUI:
         ttk.Label(row2, text="  (年份可手动输入,日随年月自动调整)",
                   foreground="gray").pack(side="left", padx=6)
 
+        # 任务参数区: 常用选项(下载图片/视频、导出格式、跳过已爬取、无头模式)
+        row2b = ttk.Frame(frame_top)
+        row2b.pack(fill="x", pady=(8, 0))
+        self.var_download_images = tk.BooleanVar(value=False)
+        ttk.Checkbutton(row2b, text="下载图片", variable=self.var_download_images).pack(side="left")
+        self.var_download_videos = tk.BooleanVar(value=False)
+        ttk.Checkbutton(row2b, text="下载视频", variable=self.var_download_videos).pack(side="left", padx=10)
+        ttk.Label(row2b, text="导出格式:").pack(side="left", padx=(10, 0))
+        self.var_export_format = tk.StringVar(value="md")
+        ttk.Combobox(row2b, textvariable=self.var_export_format, values=["md", "docx"],
+                     width=6, state="readonly").pack(side="left")
+
+        row2c = ttk.Frame(frame_top)
+        row2c.pack(fill="x", pady=(6, 0))
+        self.var_skip_existing = tk.BooleanVar(value=True)
+        ttk.Checkbutton(row2c, text="跳过已爬取的文章(按微博ID去重)",
+                        variable=self.var_skip_existing).pack(side="left")
+        ttk.Label(row2c, text="  (重新爬取时,已存在同ID文件的不再抓取)",
+                  foreground="gray").pack(side="left", padx=(4, 16))
+        self.var_headless = tk.BooleanVar(value=False)
+        ttk.Checkbutton(row2c, text="无头模式(不显示浏览器)", variable=self.var_headless).pack(side="left")
+
         # 高级设置
         frame_adv = ttk.LabelFrame(t, text="高级设置", padding=10)
         frame_adv.pack(fill="x", padx=10, pady=4)
 
         row3 = ttk.Frame(frame_adv)
         row3.pack(fill="x")
-        self.var_headless = tk.BooleanVar(value=False)
-        ttk.Checkbutton(row3, text="无头模式(不显示浏览器)", variable=self.var_headless).pack(side="left")
-        ttk.Label(row3, text="  用户数据目录:").pack(side="left")
+        ttk.Label(row3, text="用户数据目录:").pack(side="left")
         self.var_userdata = tk.StringVar(value=DEFAULT_USER_DATA_DIR)
-        ttk.Entry(row3, textvariable=self.var_userdata, width=46).pack(side="left", padx=4)
+        ttk.Entry(row3, textvariable=self.var_userdata, width=60).pack(side="left", padx=4)
 
         row4 = ttk.Frame(frame_adv)
         row4.pack(fill="x", pady=(6, 0))
@@ -296,27 +316,6 @@ class WeiboCrawlerGUI:
                     width=4).pack(side="left", padx=2)
         ttk.Label(row4b, text="秒  (提示:勿设置过短,避免触发风控)",
                   foreground="gray").pack(side="left", padx=6)
-
-        # 图片视频下载 + 导出格式
-        row4c = ttk.Frame(frame_adv)
-        row4c.pack(fill="x", pady=(6, 0))
-        self.var_download_images = tk.BooleanVar(value=False)
-        ttk.Checkbutton(row4c, text="下载图片", variable=self.var_download_images).pack(side="left")
-        self.var_download_videos = tk.BooleanVar(value=False)
-        ttk.Checkbutton(row4c, text="下载视频", variable=self.var_download_videos).pack(side="left", padx=10)
-        ttk.Label(row4c, text="导出格式:").pack(side="left", padx=(10, 0))
-        self.var_export_format = tk.StringVar(value="md")
-        ttk.Combobox(row4c, textvariable=self.var_export_format, values=["md", "docx"],
-                     width=6, state="readonly").pack(side="left")
-
-        # 跳过已爬取文章
-        row4d = ttk.Frame(frame_adv)
-        row4d.pack(fill="x", pady=(6, 0))
-        self.var_skip_existing = tk.BooleanVar(value=False)
-        ttk.Checkbutton(row4d, text="跳过已爬取的文章(按微博ID去重)",
-                        variable=self.var_skip_existing).pack(side="left")
-        ttk.Label(row4d, text="  (重新爬取时,已存在同ID文件的不再抓取)",
-                  foreground="gray").pack(side="left")
 
         # 类名覆盖
         row5 = ttk.Frame(frame_adv)
