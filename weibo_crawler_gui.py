@@ -296,8 +296,10 @@ class WeiboCrawlerGUI:
         ttk.Label(row1, text="微博ID:").pack(side="left")
         self.var_uid = tk.StringVar(value="3276099007")
         ttk.Entry(row1, textvariable=self.var_uid, width=18).pack(side="left", padx=4)
-        # 打开博主记录文件按钮
-        ttk.Button(row1, text="打开博主记录", command=self._open_blogger_record).pack(side="left", padx=8)
+        # 打开/刷新博主记录文件
+        ttk.Button(row1, text="打开博主记录", command=self._open_blogger_record).pack(side="left", padx=(8, 2))
+        ttk.Button(row1, text="刷新", command=lambda: self._reload_blogger_names(
+            self.name_combo, self.var_uid, self.var_name)).pack(side="left")
         self._load_blogger_names(self.name_combo, self.var_uid, self.var_name)
 
         row2 = ttk.Frame(frame_top)
@@ -428,11 +430,10 @@ class WeiboCrawlerGUI:
         ttk.Label(frow1, text="微博ID:").pack(side="left")
         self.f_var_uid = tk.StringVar(value="3276099007")
         ttk.Entry(frow1, textvariable=self.f_var_uid, width=18).pack(side="left", padx=4)
-        ttk.Button(frow1, text="打开博主记录", command=self._open_blogger_record).pack(side="left", padx=8)
-        self.f_lbl_bloggers = ttk.Label(frow1, text="", foreground="gray")
-        self.f_lbl_bloggers.pack(side="left")
+        ttk.Button(frow1, text="打开博主记录", command=self._open_blogger_record).pack(side="left", padx=(8, 2))
+        ttk.Button(frow1, text="刷新", command=lambda: self._reload_blogger_names(
+            self.f_name_combo, self.f_var_uid, self.f_var_name)).pack(side="left")
         self._load_blogger_names(self.f_name_combo, self.f_var_uid, self.f_var_name)
-        self._refresh_bloggers()
 
         frow2 = ttk.Frame(frame_f1)
         frow2.pack(fill="x", pady=(8, 0))
@@ -502,20 +503,6 @@ class WeiboCrawlerGUI:
         self.txt_log = scrolledtext.ScrolledText(frame_log, height=14, state="disabled", wrap="word")
         self.txt_log.pack(fill="both", expand=True)
 
-    def _refresh_bloggers(self):
-        """刷新筛选页的博主列表提示"""
-        try:
-            from weibo_crawler_core import ArticleFilter
-            af = ArticleFilter()  # 默认使用程序目录下 DataPC
-            bloggers = af.list_bloggers()
-            if bloggers:
-                self.f_lbl_bloggers.configure(
-                    text="本地已有: " + "、".join(f"{n}({i})" for n, i in bloggers))
-            else:
-                self.f_lbl_bloggers.configure(text="本地暂无已爬取数据", foreground="gray")
-        except Exception as e:
-            logger.warning(f"刷新博主列表失败: {e}")
-
     # ---------- 博主记录文件 ----------
 
     def _open_blogger_record(self):
@@ -557,6 +544,27 @@ class WeiboCrawlerGUI:
         except Exception as e:
             logger.warning(f"加载博主记录失败: {e}")
             self._blogger_records = {}
+
+    def _reload_blogger_names(self, combo, uid_var, name_var):
+        """重新从博主记录文件加载下拉框(编辑文件后点击刷新按钮调用)
+
+        保留当前选中的昵称;若当前昵称已不在记录中,则保留输入值不清空
+        """
+        try:
+            from weibo_crawler_core import load_blogger_records
+            self._blogger_records = load_blogger_records()
+            names = sorted(set(self._blogger_records.values()))
+            combo.configure(values=names)
+            current = name_var.get()
+            # 若当前名称在记录中,自动刷新ID(名称可能对应不同ID)
+            if current:
+                for uid, nm in self._blogger_records.items():
+                    if nm == current:
+                        uid_var.set(uid)
+                        break
+            self._append_log(f"已刷新博主记录,共 {len(names)} 个博主")
+        except Exception as e:
+            logger.warning(f"刷新博主记录失败: {e}")
 
     def _remember_blogger(self, uid, name):
         """把新爬取的博主写入记录文件"""
