@@ -308,13 +308,15 @@ class AIRunner:
                 for f in os.listdir(month_path):
                     if not f.endswith(ext):
                         continue
-                    # 兼容两种文件名: <博主>_<日期>_<ID>.ext 与 <AI标题>_<日期>.ext
-                    # (取最后一个匹配,避免标题中恰好含有类似日期片段)
+                    # 兼容三种文件名:
+                    #   新: <日期>_<AI标题>.ext (如 26-1-22_深度解析.md)
+                    #   旧: <博主>_<日期>_<ID>.ext 与 <AI标题>_<日期>.ext
+                    # 优先取"开头是日期"的匹配;否则取下划线日期形式的第一个匹配
                     fms = list(re.finditer(
-                        r"_(\d{2,4})-(\d{1,2})-(\d{1,2})(?=_|\.(?:md|docx)$)", f))
+                        r"(?:^|_)(\d{2,4})-(\d{1,2})-(\d{1,2})(?=_|\.(?:md|docx)$)", f))
                     if not fms:
                         continue
-                    fm = fms[-1]
+                    fm = fms[0]
                     year = int(fm.group(1))
                     if year < 100:
                         year += 2000
@@ -496,8 +498,8 @@ class AIRunner:
             os.makedirs(dst_dir, exist_ok=True)
             new_name = os.path.basename(fpath)
             if title and not keep_original:
-                # 重命名: <AI标题>_<年-月-日>.ext(如 深度解析DeepSeek_26-3-1.md)
-                # 日期沿用原文件名的写法(不补零),与原数据风格一致
+                # 重命名: <年-月-日>_<AI标题>.ext(如 26-1-22_深度解析.md)
+                # 日期放在文件名开头,资源管理器按名称排序(升/降序)即按日期排序
                 _, ext = os.path.splitext(new_name)
                 safe_title = self._sanitize_filename_part(title, max_len=40)
                 dm = re.search(r"_(\d{2,4})-(\d{1,2})-(\d{1,2})", new_name)
@@ -505,7 +507,7 @@ class AIRunner:
                     date_part = f"{dm.group(1)}-{dm.group(2)}-{dm.group(3)}"
                 else:
                     date_part = (f"{fdate.year % 100}-{fdate.month}-{fdate.day}")
-                new_name = f"{safe_title}_{date_part}{ext}"
+                new_name = f"{date_part}_{safe_title}{ext}"
             dst = os.path.join(dst_dir, new_name)
             if os.path.exists(dst):
                 if keep_source:

@@ -813,7 +813,7 @@ class WeiboCrawlerGUI:
         ttk.Checkbutton(run_row3, text="保留原文件(默认勾选,不移动)",
                         variable=self.a_var_keep_source).pack(side="left", padx=10)
         self.a_var_keep_original = tk.BooleanVar(value=False)
-        ttk.Checkbutton(run_row3, text="保留原标题(不勾选则重命名为“AI标题_年-月-日”)",
+        ttk.Checkbutton(run_row3, text="保留原标题(不勾选则重命名为“日期_AI标题”,按名称排序即按日期)",
                         variable=self.a_var_keep_original).pack(side="left", padx=10)
         self._hint(run_row3, "(总结标题写入各类别目录的 AI总结.txt)",
                    pack=dict(side="left"))
