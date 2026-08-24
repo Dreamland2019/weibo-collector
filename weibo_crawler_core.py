@@ -55,6 +55,56 @@ def ensure_logger(log_level=logging.INFO):
     return logger
 
 
+# ---------- 博主记录文件(DataPC/博主记录.txt) ----------
+
+BLOGGER_RECORD_FILE = "博主记录.txt"
+
+
+def blogger_record_path(data_root=None):
+    """博主记录文件路径: 默认位于 DataPC 目录下"""
+    root = data_root or os.path.join(app_dir(), "DataPC")
+    return os.path.join(root, BLOGGER_RECORD_FILE)
+
+
+def load_blogger_records(data_root=None):
+    """读取博主记录文件,返回 {user_id: user_name}(文件不存在则返回空)
+
+    文件格式: 每行 "微博ID 博主昵称"(空格分隔),支持 # 注释
+    """
+    records = {}
+    path = blogger_record_path(data_root)
+    try:
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    parts = line.split()
+                    if len(parts) >= 2 and parts[0].isdigit():
+                        records[parts[0]] = " ".join(parts[1:])
+    except Exception as e:
+        logger.warning(f"读取博主记录文件失败: {e}")
+    return records
+
+
+def save_blogger_record(user_id, user_name, data_root=None):
+    """将博主写入记录文件(已存在则跳过),返回是否新增"""
+    path = blogger_record_path(data_root)
+    records = load_blogger_records(data_root)
+    if user_id in records:
+        return False
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(f"{user_id} {user_name}\n")
+        logger.info(f"已记录博主: {user_name}({user_id}) -> {path}")
+        return True
+    except Exception as e:
+        logger.warning(f"写入博主记录失败: {e}")
+        return False
+
+
 def app_dir():
     """获取应用程序所在目录
 
@@ -1173,7 +1223,7 @@ class WeiboPCCrawler:
                          min_interval=3, max_interval=8, progress_callback=None,
                          overwrite=False, month_subdirs=True,
                          download_images=False, download_videos=False,
-                         export_format="md", skip_existing=False):
+                         export_format="md", skip_existing=False, min_words=0):
         """逐条抓取详情并导出(支持 md / docx 格式)
 
         参数:
@@ -1183,6 +1233,7 @@ class WeiboPCCrawler:
           download_images/videos       是否下载图片/视频到本地
           export_format                "md" 或 "docx"
           skip_existing                已存在同ID文件时跳过(不重复抓取)
+          min_words                    正文字数低于该值的文章不导出(0=不限制)
 
         返回 (成功数, 失败数, 跳过数)
         """
@@ -1208,6 +1259,12 @@ class WeiboPCCrawler:
             if not detail:
                 fail_count += 1
                 logger.error(f"无法获取微博 {weibo_id} 的详情")
+                continue
+
+            # 最低字数过滤: 正文字数低于 min_words 时不导出
+            if min_words > 0 and len(detail.get("content", "")) < min_words:
+                skipped_count += 1
+                logger.info(f"正文字数低于 {min_words},跳过: {weibo_id}")
                 continue
 
             # 文件名: 用户名_日期_微博ID.ext (日期来自发布时间)
@@ -1528,7 +1585,7 @@ def run_task(user_id, user_name, start_date, end_date,
              keep_browser_open=False, skip_export=False,
              min_interval=3, max_interval=8,
              download_images=False, download_videos=False,
-             export_format="md", skip_existing=False):
+             export_format="md", skip_existing=False, min_words=0):
     """一键爬取任务:收集指定时间范围的微博ID并导出
 
     参数:
@@ -1546,6 +1603,7 @@ def run_task(user_id, user_name, start_date, end_date,
       download_images/videos 是否下载图片/视频
       export_format          导出格式 "md" 或 "docx"
       skip_existing          跳过已存在同ID文件的微博(避免重复抓取)
+      min_words              正文字数低于该值的文章不导出(0=不限制)
 
     返回 dict:
       {"username", "weibo_ids", "txt_file", "md_dir", "exported", "failed"}
@@ -1615,7 +1673,8 @@ def run_task(user_id, user_name, start_date, end_date,
             month_subdirs=True,
             min_interval=min_interval, max_interval=max_interval,
             download_images=download_images, download_videos=download_videos,
-            export_format=export_format, skip_existing=skip_existing)
+            export_format=export_format, skip_existing=skip_existing,
+            min_words=min_words)
         result["exported"] = ok_count
         result["failed"] = fail_count
         result["skipped"] = skipped_count
@@ -1843,14 +1902,15 @@ class ArticleFilter:
         records.sort(key=lambda r: (-r["score"], -r["date"].timestamp()))
         top = records[:top_n]
 
-        # 4. 创建输出文件夹: 筛选/<博主>_<起>~<止>_TOP<N>
+        # 4. 创建输出文件夹: 筛选/<博主>_<起>~<止>_热度TOP<N> 或 _字数TOP<N>
         os.makedirs(self.filter_root, exist_ok=True)
+        metric_tag = "字数" if by_word_count else "热度"
         out_dir = os.path.join(
             self.filter_root,
-            f"{user_name}_{start_date}~{end_date}_TOP{len(top)}")
+            f"{user_name}_{start_date}~{end_date}_{metric_tag}TOP{len(top)}")
         os.makedirs(out_dir, exist_ok=True)
 
-        # 5. 复制/移动并重命名(序号前缀体现排名)
+        # 5. 复制/移动并重命名(序号前缀体现排名),同步复制图片/视频
         items = []
         for idx, rec in enumerate(top, 1):
             src = rec["file"]
@@ -1863,6 +1923,8 @@ class ArticleFilter:
                 shutil.move(src, dst)
             else:
                 shutil.copy2(src, dst)
+            # 同步复制同目录 images/ videos/ 下属于该微博的媒体文件
+            self._copy_weibo_media(src, out_dir, move)
             rec["new_name"] = new_name
             items.append(rec)
 
@@ -1872,6 +1934,37 @@ class ArticleFilter:
 
         logger.info(f"筛选完成: 共扫描 {len(records)} 篇, 输出前 {len(top)} 篇到 {out_dir}")
         return {"output_dir": out_dir, "items": items, "skipped": []}
+
+    @staticmethod
+    def _copy_weibo_media(src_file, out_dir, move=False):
+        """把与文章同目录 images/ videos/ 下属于该微博的媒体文件复制/移动到输出目录
+
+        媒体文件名格式: <微博ID>_<序号>.<ext>(如 R9UIBEhFF_1.jpg)
+        从文章文件名中提取微博ID(文件名形如 ..._<日期>_<微博ID>.md)
+        """
+        try:
+            m = re.search(r"_([A-Za-z0-9]+)\.(?:md|docx)$", os.path.basename(src_file))
+            if not m:
+                return
+            weibo_id = m.group(1)
+            src_dir = os.path.dirname(src_file)
+            for sub in ("images", "videos"):
+                src_sub = os.path.join(src_dir, sub)
+                if not os.path.isdir(src_sub):
+                    continue
+                dst_sub = os.path.join(out_dir, sub)
+                os.makedirs(dst_sub, exist_ok=True)
+                prefix = f"{weibo_id}_"
+                for fname in os.listdir(src_sub):
+                    if fname.startswith(prefix):
+                        s = os.path.join(src_sub, fname)
+                        d = os.path.join(dst_sub, fname)
+                        if move:
+                            shutil.move(s, d)
+                        else:
+                            shutil.copy2(s, d)
+        except Exception as e:
+            logger.warning(f"复制微博媒体失败 {src_file}: {e}")
 
     @staticmethod
     def _write_summary(out_dir, items, use_repost, use_comment, use_like,

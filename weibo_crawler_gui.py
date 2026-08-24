@@ -146,7 +146,28 @@ class WeiboCrawlerGUI:
             "download_videos": self.var_download_videos.get(),
             "export_format": self.var_export_format.get(),
             "skip_existing": self.var_skip_existing.get(),
+            "min_words": self.var_min_words.get(),
         }
+        # 筛选页设置
+        if hasattr(self, "f_var_name"):
+            data.update({
+                "f_name": self.f_var_name.get(),
+                "f_uid": self.f_var_uid.get(),
+                "f_start_year": self.f_var_start_year.get(),
+                "f_start_month": self.f_var_start_month.get(),
+                "f_start_day": self.f_var_start_day.get(),
+                "f_end_year": self.f_var_end_year.get(),
+                "f_end_month": self.f_var_end_month.get(),
+                "f_end_day": self.f_var_end_day.get(),
+                "f_sort_mode": self.f_var_sort_mode.get(),
+                "f_use_repost": self.f_var_use_repost.get(),
+                "f_use_comment": self.f_var_use_comment.get(),
+                "f_use_like": self.f_var_use_like.get(),
+                "f_top": self.f_var_top.get(),
+                "f_format": self.f_var_format.get(),
+                "f_move": self.f_var_move.get(),
+                "f_filter_root": self.f_var_filter_root.get(),
+            })
         # 类名覆盖
         for key, var in self.class_vars.items():
             data[f"class_{key}"] = var.get()
@@ -177,6 +198,25 @@ class WeiboCrawlerGUI:
         self.var_download_videos.set(bool(st.get("download_videos", False)))
         self.var_export_format.set(st.get("export_format", self.var_export_format.get()))
         self.var_skip_existing.set(bool(st.get("skip_existing", False)))
+        self.var_min_words.set(st.get("min_words", self.var_min_words.get()))
+        # 筛选页设置恢复
+        if hasattr(self, "f_var_name"):
+            self.f_var_name.set(st.get("f_name", self.f_var_name.get()))
+            self.f_var_uid.set(st.get("f_uid", self.f_var_uid.get()))
+            self.f_var_start_year.set(st.get("f_start_year", self.f_var_start_year.get()))
+            self.f_var_start_month.set(st.get("f_start_month", self.f_var_start_month.get()))
+            self.f_var_start_day.set(st.get("f_start_day", self.f_var_start_day.get()))
+            self.f_var_end_year.set(st.get("f_end_year", self.f_var_end_year.get()))
+            self.f_var_end_month.set(st.get("f_end_month", self.f_var_end_month.get()))
+            self.f_var_end_day.set(st.get("f_end_day", self.f_var_end_day.get()))
+            self.f_var_sort_mode.set(st.get("f_sort_mode", self.f_var_sort_mode.get()))
+            self.f_var_use_repost.set(bool(st.get("f_use_repost", True)))
+            self.f_var_use_comment.set(bool(st.get("f_use_comment", True)))
+            self.f_var_use_like.set(bool(st.get("f_use_like", True)))
+            self.f_var_top.set(st.get("f_top", self.f_var_top.get()))
+            self.f_var_format.set(st.get("f_format", self.f_var_format.get()))
+            self.f_var_move.set(bool(st.get("f_move", False)))
+            self.f_var_filter_root.set(st.get("f_filter_root", self.f_var_filter_root.get()))
         for key, var in self.class_vars.items():
             val = st.get(f"class_{key}", "")
             if val:
@@ -190,8 +230,12 @@ class WeiboCrawlerGUI:
         now = datetime.now()
         return [str(y) for y in range(now.year - 10, now.year + 2)]
 
-    def _build_date_picker(self, parent, year_var, month_var, day_var, _unused=None):
-        """构建年/月/日选择器;年份可手动输入(10年前~明年),月/日下拉"""
+    def _build_date_picker(self, parent, year_var, month_var, day_var, _unused=None,
+                           reset_day_on_month=False):
+        """构建年/月/日选择器;年份可手动输入(10年前~明年),月/日下拉
+
+        reset_day_on_month=True 时,切换月份将日期重置为 1 日(用于开始日期)
+        """
         years = self._year_options()
         months = [f"{m:02d}" for m in range(1, 13)]
         y_cb = ttk.Combobox(parent, textvariable=year_var, values=years,
@@ -206,13 +250,19 @@ class WeiboCrawlerGUI:
                             width=4, state="readonly")
         d_cb.pack(side="left")
         ttk.Label(parent, text="日").pack(side="left", padx=(0, 4))
-        # 年月变化时刷新日选项
-        m_cb.bind("<<ComboboxSelected>>", lambda e: self._refresh_day_options(
-            year_var, month_var, day_var, d_cb))
-        y_cb.bind("<<ComboboxSelected>>", lambda e: self._refresh_day_options(
-            year_var, month_var, day_var, d_cb))
-        y_cb.bind("<FocusOut>", lambda e: self._refresh_day_options(
-            year_var, month_var, day_var, d_cb))
+
+        def on_month_change(event=None):
+            if reset_day_on_month:
+                # 开始日期: 切换月份时日期重置为 1 日
+                day_var.set("01")
+            self._refresh_day_options(year_var, month_var, day_var, d_cb)
+
+        def on_year_change(event=None):
+            self._refresh_day_options(year_var, month_var, day_var, d_cb)
+
+        m_cb.bind("<<ComboboxSelected>>", on_month_change)
+        y_cb.bind("<<ComboboxSelected>>", on_year_change)
+        y_cb.bind("<FocusOut>", on_year_change)
         year_var.trace_add("write", lambda *a: self._refresh_day_options(
             year_var, month_var, day_var, d_cb))
         self._refresh_day_options(year_var, month_var, day_var, d_cb)
@@ -241,10 +291,14 @@ class WeiboCrawlerGUI:
         row1.pack(fill="x")
         ttk.Label(row1, text="博主昵称:").pack(side="left")
         self.var_name = tk.StringVar(value="卢诗翰")
-        ttk.Entry(row1, textvariable=self.var_name, width=18).pack(side="left", padx=(4, 20))
+        self.name_combo = ttk.Combobox(row1, textvariable=self.var_name, width=18)
+        self.name_combo.pack(side="left", padx=(4, 8))
         ttk.Label(row1, text="微博ID:").pack(side="left")
         self.var_uid = tk.StringVar(value="3276099007")
         ttk.Entry(row1, textvariable=self.var_uid, width=18).pack(side="left", padx=4)
+        # 打开博主记录文件按钮
+        ttk.Button(row1, text="打开博主记录", command=self._open_blogger_record).pack(side="left", padx=8)
+        self._load_blogger_names(self.name_combo, self.var_uid, self.var_name)
 
         row2 = ttk.Frame(frame_top)
         row2.pack(fill="x", pady=(8, 0))
@@ -254,7 +308,7 @@ class WeiboCrawlerGUI:
         self.var_start_month = tk.StringVar(value=st.get("start_month", ""))
         self.var_start_day = tk.StringVar(value=st.get("start_day", ""))
         self._build_date_picker(row2, self.var_start_year, self.var_start_month,
-                                self.var_start_day, None)
+                                self.var_start_day, None, reset_day_on_month=True)
         ttk.Label(row2, text="  结束日期:").pack(side="left")
         self.var_end_year = tk.StringVar(value=st.get("end_year", ""))
         self.var_end_month = tk.StringVar(value=st.get("end_month", ""))
@@ -323,6 +377,16 @@ class WeiboCrawlerGUI:
         ttk.Label(row4b, text="秒  (提示:勿设置过短,避免触发风控)",
                   foreground="gray").pack(side="left", padx=6)
 
+        # 最低正文字数过滤(0=不限制)
+        row4e = ttk.Frame(frame_adv)
+        row4e.pack(fill="x", pady=(6, 0))
+        ttk.Label(row4e, text="最低正文字数:").pack(side="left")
+        self.var_min_words = tk.StringVar(value="0")
+        ttk.Spinbox(row4e, from_=0, to=100000, textvariable=self.var_min_words,
+                    width=6).pack(side="left", padx=4)
+        ttk.Label(row4e, text="字符  (正文低于该字数的文章不导出;0=不限制)",
+                  foreground="gray").pack(side="left")
+
         # 类名覆盖
         row5 = ttk.Frame(frame_adv)
         row5.pack(fill="x", pady=(6, 0))
@@ -359,13 +423,15 @@ class WeiboCrawlerGUI:
         frow1.pack(fill="x")
         ttk.Label(frow1, text="博主昵称:").pack(side="left")
         self.f_var_name = tk.StringVar(value="卢诗翰")
-        ttk.Entry(frow1, textvariable=self.f_var_name, width=18).pack(side="left", padx=(4, 20))
+        self.f_name_combo = ttk.Combobox(frow1, textvariable=self.f_var_name, width=18)
+        self.f_name_combo.pack(side="left", padx=(4, 8))
         ttk.Label(frow1, text="微博ID:").pack(side="left")
         self.f_var_uid = tk.StringVar(value="3276099007")
         ttk.Entry(frow1, textvariable=self.f_var_uid, width=18).pack(side="left", padx=4)
-        ttk.Button(frow1, text="刷新博主列表", command=self._refresh_bloggers).pack(side="left", padx=8)
+        ttk.Button(frow1, text="打开博主记录", command=self._open_blogger_record).pack(side="left", padx=8)
         self.f_lbl_bloggers = ttk.Label(frow1, text="", foreground="gray")
         self.f_lbl_bloggers.pack(side="left")
+        self._load_blogger_names(self.f_name_combo, self.f_var_uid, self.f_var_name)
         self._refresh_bloggers()
 
         frow2 = ttk.Frame(frame_f1)
@@ -375,7 +441,7 @@ class WeiboCrawlerGUI:
         self.f_var_start_month = tk.StringVar(value="")
         self.f_var_start_day = tk.StringVar(value="")
         self._build_date_picker(frow2, self.f_var_start_year, self.f_var_start_month,
-                                self.f_var_start_day, None)
+                                self.f_var_start_day, None, reset_day_on_month=True)
         ttk.Label(frow2, text="  结束日期:").pack(side="left")
         self.f_var_end_year = tk.StringVar(value="")
         self.f_var_end_month = tk.StringVar(value="")
@@ -449,6 +515,56 @@ class WeiboCrawlerGUI:
                 self.f_lbl_bloggers.configure(text="本地暂无已爬取数据", foreground="gray")
         except Exception as e:
             logger.warning(f"刷新博主列表失败: {e}")
+
+    # ---------- 博主记录文件 ----------
+
+    def _open_blogger_record(self):
+        """用系统默认文本编辑器打开博主记录文件"""
+        try:
+            from weibo_crawler_core import blogger_record_path
+            path = blogger_record_path()  # DataPC/博主记录.txt
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            if not os.path.exists(path):
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write("# 博主记录文件\n")
+                    f.write("# 格式: 微博ID 博主昵称 (空格分隔,每行一个)\n")
+                    f.write("# 可手动增删博主;程序爬取新博主后会自动追加\n")
+            os.startfile(path)  # Windows 下用默认编辑器打开
+            self._append_log(f"已打开博主记录文件: {path}")
+        except Exception as e:
+            logger.error(f"打开博主记录文件失败: {e}")
+            messagebox.showerror("错误", f"无法打开博主记录文件:\n{e}")
+
+    def _load_blogger_names(self, combo, uid_var, name_var):
+        """从博主记录文件加载名称到下拉框;选中名称时自动填充ID"""
+        try:
+            from weibo_crawler_core import load_blogger_records
+            self._blogger_records = load_blogger_records()  # {uid: name}
+            names = sorted(set(self._blogger_records.values()))
+            combo.configure(values=names)
+            if names and not name_var.get():
+                name_var.set(names[0])
+
+            def on_select(event):
+                sel = name_var.get()
+                # 按名称找ID
+                for uid, nm in self._blogger_records.items():
+                    if nm == sel:
+                        uid_var.set(uid)
+                        return
+
+            combo.bind("<<ComboboxSelected>>", on_select)
+        except Exception as e:
+            logger.warning(f"加载博主记录失败: {e}")
+            self._blogger_records = {}
+
+    def _remember_blogger(self, uid, name):
+        """把新爬取的博主写入记录文件"""
+        try:
+            from weibo_crawler_core import save_blogger_record
+            save_blogger_record(uid, name)
+        except Exception as e:
+            logger.warning(f"记录博主失败: {e}")
 
     # ---------- 日志与队列 ----------
 
@@ -608,6 +724,9 @@ class WeiboCrawlerGUI:
             messagebox.showwarning("参数不完整", "请填写博主昵称和微博ID")
             return
 
+        # 新博主自动记入博主记录文件
+        self._remember_blogger(uid, name)
+
         # 记住本次选择的日期,下次打开自动填入
         self._save_settings()
 
@@ -657,6 +776,7 @@ class WeiboCrawlerGUI:
             "download_videos": self.var_download_videos.get(),
             "export_format": self.var_export_format.get(),
             "skip_existing": self.var_skip_existing.get(),
+            "min_words": int(self.var_min_words.get() or 0),
         }
 
         self.worker = threading.Thread(target=self._run_worker, args=(kwargs,), daemon=True)
@@ -706,6 +826,9 @@ class WeiboCrawlerGUI:
         except ValueError:
             messagebox.showwarning("篇数错误", "输出篇数应为正整数")
             return
+
+        # 记住筛选页设置
+        self._save_settings()
 
         self._append_log("=" * 60)
         self._append_log(f"开始筛选: 博主={name}({uid}), 时间={start} ~ {end}, "

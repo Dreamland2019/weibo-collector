@@ -72,6 +72,8 @@ def parse_args():
     p_crawl.add_argument("--num-class", dest="num_class", help="转评赞数字类名(覆盖)")
     p_crawl.add_argument("--skip-existing", action="store_true",
                          help="跳过已存在同ID文件的微博(避免重复抓取)")
+    p_crawl.add_argument("--min-words", type=int, default=0,
+                         help="正文字数低于该值的文章不导出(0=不限制)")
     p_crawl.set_defaults(command="crawl")
 
     # ---- 筛选子命令 ----
@@ -202,6 +204,7 @@ def cmd_crawl(args):
         download_videos=args.download_videos,
         export_format=args.export_format,
         skip_existing=args.skip_existing,
+        min_words=args.min_words,
     )
 
     print()
