@@ -1251,6 +1251,38 @@ class WeiboPCCrawler:
             # 跳过已存在文件(按微博ID匹配,避免重复抓取)
             if skip_existing and self._weibo_file_exists(
                     output_dir, weibo_id, export_format):
+                # 若勾选了下载图片/视频,检查媒体是否完整:
+                # 文章存在但媒体缺失(如之前只爬文章没下图片)时,
+                # 重新抓详情仅补下载媒体,不重写文章文件
+                month_dir = self._find_weibo_dir(output_dir, weibo_id, export_format)
+                need_media = False
+                if download_images and month_dir and not self._media_exists(
+                        month_dir, weibo_id, "images"):
+                    need_media = True
+                if download_videos and month_dir and not self._media_exists(
+                        month_dir, weibo_id, "videos"):
+                    need_media = True
+
+                if need_media:
+                    logger.info(f"文章已存在但媒体缺失,补下载媒体: {weibo_id}")
+                    detail = self.get_weibo_detail(weibo_id, user_id)
+                    if detail:
+                        if download_images:
+                            if detail.get("images"):
+                                self._download_media(
+                                    detail["images"], month_dir, "images", weibo_id)
+                            else:
+                                # 确认无图,写标记避免下次重复检查
+                                self._mark_no_media(month_dir, weibo_id, "images")
+                        if download_videos:
+                            if detail.get("videos"):
+                                self._download_media(
+                                    detail["videos"], month_dir, "videos", weibo_id)
+                            else:
+                                self._mark_no_media(month_dir, weibo_id, "videos")
+                        skipped_count += 1  # 文章未重写,仍计入跳过
+                        continue
+                    # 详情获取失败则继续正常跳过
                 skipped_count += 1
                 logger.info(f"已存在同ID文件,跳过: {weibo_id}")
                 continue
@@ -1341,10 +1373,11 @@ class WeiboPCCrawler:
         logger.info(f"导出完成: 成功 {ok_count} 条, 失败 {fail_count} 条, 跳过 {skipped_count} 条")
         return ok_count, fail_count, skipped_count
 
-    def _weibo_file_exists(self, output_dir, weibo_id, export_format="md"):
-        """检查指定微博ID是否已有导出文件(在 年份/月份 目录树中查找)
+    def _find_weibo_dir(self, output_dir, weibo_id, export_format="md"):
+        """查找指定微博ID导出文件所在的月份目录(在 年份/月份 目录树中)
 
         文件名格式: <博主>_<日期>_<微博ID>.md|docx
+        返回目录路径;未找到返回 None
         """
         ext = ".docx" if export_format == "docx" else ".md"
         target = f"_{weibo_id}{ext}"
@@ -1359,9 +1392,42 @@ class WeiboPCCrawler:
                         continue
                     for f in os.listdir(month_path):
                         if f.endswith(target):
-                            return True
+                            return month_path
         except Exception as e:
-            logger.warning(f"检查已存在文件时出错: {e}")
+            logger.warning(f"查找微博文件时出错: {e}")
+        return None
+
+    def _weibo_file_exists(self, output_dir, weibo_id, export_format="md"):
+        """检查指定微博ID是否已有导出文件"""
+        return self._find_weibo_dir(output_dir, weibo_id, export_format) is not None
+
+    @staticmethod
+    def _mark_no_media(month_dir, weibo_id, media_type):
+        """写"已确认无该类型媒体"标记文件,避免后续重复抓详情检查"""
+        try:
+            marker = os.path.join(month_dir, f"{weibo_id}.{media_type}.nomedia")
+            with open(marker, "w", encoding="utf-8") as f:
+                f.write("confirmed no media\n")
+        except Exception as e:
+            logger.warning(f"写无媒体标记失败: {e}")
+
+    @staticmethod
+    def _media_exists(month_dir, weibo_id, media_type="images"):
+        """检查指定微博在该目录下是否已有媒体文件(如 images/xxx_1.jpg)
+
+        存在标记文件 <weibo_id>.nomedia 时视为"已确认无该类型媒体",返回 True
+        (避免对无图微博重复抓详情检查)
+        """
+        marker = os.path.join(month_dir, f"{weibo_id}.{media_type}.nomedia")
+        if os.path.exists(marker):
+            return True
+        sub = os.path.join(month_dir, media_type)
+        if not os.path.isdir(sub):
+            return False
+        prefix = f"{weibo_id}_"
+        for f in os.listdir(sub):
+            if f.startswith(prefix):
+                return True
         return False
 
     @staticmethod
