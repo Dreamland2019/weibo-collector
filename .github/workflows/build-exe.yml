@@ -28,9 +28,10 @@ jobs:
 
       # 注意:Windows runner 默认用 PowerShell,不能使用 cmd 的 ^ 续行符,
       # 故 pyinstaller 命令写成单行,并用 --add-data 打包 class_names.json
+      # --hidden-import weibo_ai: weibo_ai 在 GUI 内为函数内懒导入,显式声明确保打包
       # 从 V0.3.0 起只发布 GUI 版本(不再打包 CLI)
       - name: Build GUI exe
-        run: pyinstaller --noconfirm --onefile --windowed --name "weibo-md-exporter-GUI" --add-data "class_names.json;." --collect-all selenium weibo_crawler_gui.py
+        run: pyinstaller --noconfirm --onefile --windowed --name "weibo-md-exporter-GUI" --add-data "class_names.json;." --collect-all selenium --hidden-import weibo_ai weibo_crawler_gui.py
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4

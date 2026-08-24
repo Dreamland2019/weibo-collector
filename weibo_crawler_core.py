@@ -813,8 +813,11 @@ class WeiboPCCrawler:
     def collect_weibo_ids(self, user_id, start_date=None, end_date=None,
                           max_count=500, keyword="", is_ori=1, is_forward=0,
                           is_text=1, is_pic=1, is_video=1, is_music=1,
-                          user_name=None):
+                          user_name=None, min_words=0):
         """收集指定用户指定时间范围内的微博 ID(原创/转发可选)
+
+        min_words>0 时在列表页做粗过滤: 卡片预览字数低于该值的微博
+        不收集(不进详情页);精确过滤仍由导出阶段(min_words)负责。
 
         返回 (username, weibo_ids)
         """
@@ -860,10 +863,12 @@ class WeiboPCCrawler:
         username = self.get_username(user_id, fallback_name=user_name or user_id)
 
         # 边滚动边收集微博 ID
-        weibo_ids = self._scroll_and_collect(user_id, card_cls, time_cls, max_count)
+        weibo_ids = self._scroll_and_collect(user_id, card_cls, time_cls, max_count,
+                                             min_words=min_words)
         return username, weibo_ids
 
-    def _scroll_and_collect(self, user_id, card_cls, time_cls, max_count=500):
+    def _scroll_and_collect(self, user_id, card_cls, time_cls, max_count=500,
+                            min_words=0):
         """渐进式滚动收集微博 ID"""
         weibo_ids = []
         processed_ids = set()
@@ -880,7 +885,8 @@ class WeiboPCCrawler:
                scroll_attempts < max_scroll_attempts and
                no_progress_count < max_no_progress):
 
-            new_ids = self._extract_ids_from_cards(card_selector, time_cls, user_id, processed_ids)
+            new_ids = self._extract_ids_from_cards(card_selector, time_cls, user_id,
+                                                    processed_ids, min_words=min_words)
             new_count = 0
             for wid in new_ids:
                 if wid not in weibo_ids:
@@ -919,8 +925,13 @@ class WeiboPCCrawler:
         logger.info(f"滚动完成,共尝试 {scroll_attempts} 次,找到 {len(weibo_ids)} 个微博ID")
         return weibo_ids[:max_count]
 
-    def _extract_ids_from_cards(self, card_selector, time_cls, user_id, processed_ids):
-        """从当前页面卡片中提取微博 ID(含展开按钮、非转发)"""
+    def _extract_ids_from_cards(self, card_selector, time_cls, user_id, processed_ids,
+                                min_words=0):
+        """从当前页面卡片中提取微博 ID(含展开按钮、非转发)
+
+        min_words>0 时做列表页粗过滤: 卡片正文预览字数低于 min_words
+        的微博不收集(避免进入详情页,节省时间;最终以详情页精确过滤为准)
+        """
         weibo_ids = []
         try:
             cards = self.driver.find_elements(By.CSS_SELECTOR, card_selector)
@@ -930,6 +941,7 @@ class WeiboPCCrawler:
             return weibo_ids
 
         time_selector = f"a.{time_cls}"
+        content_cls = self.classes.get("content")  # 列表页正文预览类名(可能为空)
         for i, card in enumerate(cards):
             try:
                 # 必须有"展开"按钮(说明是长文)
@@ -942,6 +954,14 @@ class WeiboPCCrawler:
                     By.XPATH, ".//div[contains(@class, 'repost') or contains(text(), '转发微博')]")
                 if repost_elements:
                     continue
+                # 列表页粗过滤: 预览正文字数低于 min_words 的不收集
+                if min_words > 0 and content_cls:
+                    preview_els = card.find_elements(By.CSS_SELECTOR, f"div.{content_cls}")
+                    preview = (preview_els[0].text or "") if preview_els else ""
+                    if len(preview) < min_words:
+                        logger.info(f"列表预览字数 {len(preview)} < {min_words},"
+                                    f"粗过滤跳过该卡片")
+                        continue
                 # 时间链接
                 time_links = card.find_elements(By.CSS_SELECTOR, time_selector)
                 if not time_links:
@@ -1217,13 +1237,17 @@ class WeiboPCCrawler:
         md += f">评论数：{detail['comment_count']}\n"
         md += f">点赞数：{detail['like_count']}\n"
         md += f">保存时间：{detail['save_time']}"
+        if detail.get("ai_quality") is not None:
+            md += f"\n>高质量可信度：{detail['ai_quality']}%"
         return md
 
     def export_markdowns(self, weibo_ids, user_id, user_name, base_dir,
                          min_interval=3, max_interval=8, progress_callback=None,
                          overwrite=False, month_subdirs=True,
                          download_images=False, download_videos=False,
-                         export_format="md", skip_existing=False, min_words=0):
+                         export_format="md", skip_existing=False, min_words=0,
+                         ai_enabled=False, ai_classifier=None, ai_config=None,
+                         ai_usage_callback=None):
         """逐条抓取详情并导出(支持 md / docx 格式)
 
         参数:
@@ -1234,13 +1258,24 @@ class WeiboPCCrawler:
           export_format                "md" 或 "docx"
           skip_existing                已存在同ID文件时跳过(不重复抓取)
           min_words                    正文字数低于该值的文章不导出(0=不限制)
+          ai_enabled                   启用 AI 实时判断
+          ai_classifier                AIClassifier 实例(ai_enabled 时必传)
+          ai_config                    AIConfig 实例(取高质量阈值等)
+          ai_usage_callback            每次AI调用后回调(token增量), 用于显示用量
 
-        返回 (成功数, 失败数, 跳过数)
+        返回 (成功数, 失败数, 跳过数, AI过滤数)
         """
         output_dir = base_dir  # 已由调用方创建
         ok_count = 0
         fail_count = 0
         skipped_count = 0
+        ai_skipped_count = 0
+        ai_quality_threshold = 80
+        if ai_enabled and ai_config is not None:
+            try:
+                ai_quality_threshold = int(ai_config.get("quality_threshold", 80))
+            except (TypeError, ValueError):
+                ai_quality_threshold = 80
         total = len(weibo_ids)
 
         for i, weibo_id in enumerate(weibo_ids):
@@ -1299,6 +1334,28 @@ class WeiboPCCrawler:
                 logger.info(f"正文字数低于 {min_words},跳过: {weibo_id}")
                 continue
 
+            # AI 实时判断: 高质量可信度低于阈值则不导出(也不下载媒体)
+            ai_quality = None
+            if ai_enabled and ai_classifier is not None:
+                try:
+                    _, _, quality_prob, usage = ai_classifier.classify(
+                        detail.get("content", ""))
+                    ai_quality = int(quality_prob or 0)
+                    tokens = int(usage.get("total_tokens", 0) or 0)
+                    if ai_usage_callback:
+                        ai_usage_callback(tokens)
+                    if ai_quality < ai_quality_threshold:
+                        ai_skipped_count += 1
+                        logger.info(
+                            f"AI判定非高质量(高质量可信度{ai_quality}% < "
+                            f"{ai_quality_threshold}%),跳过且不下载媒体: {weibo_id}")
+                        continue
+                    logger.info(f"AI判定高质量(高质量可信度{ai_quality}%): {weibo_id}")
+                except Exception as e:
+                    # AI 失败时按通过处理,避免卡住整个爬取
+                    logger.warning(f"AI实时判断失败({e}),按通过处理: {weibo_id}")
+                    ai_quality = None
+
             # 文件名: 用户名_日期_微博ID.ext (日期来自发布时间)
             save_time = detail['publish_time']
             date_part = save_time.split()[0] if save_time and save_time != "未知时间" else "unknown"
@@ -1335,6 +1392,8 @@ class WeiboPCCrawler:
 
             # 生成内容并写入
             try:
+                if ai_quality is not None:
+                    detail["ai_quality"] = ai_quality
                 if export_format == "docx":
                     self._write_docx(detail, output_path, month_dir,
                                      local_images, local_videos,
@@ -1370,8 +1429,9 @@ class WeiboPCCrawler:
                 logger.info(f"等待 {sleep_time} 秒后处理下一个...")
                 time.sleep(sleep_time)
 
-        logger.info(f"导出完成: 成功 {ok_count} 条, 失败 {fail_count} 条, 跳过 {skipped_count} 条")
-        return ok_count, fail_count, skipped_count
+        logger.info(f"导出完成: 成功 {ok_count} 条, 失败 {fail_count} 条, "
+                    f"跳过 {skipped_count} 条, AI过滤 {ai_skipped_count} 条")
+        return ok_count, fail_count, skipped_count, ai_skipped_count
 
     def _find_weibo_dir(self, output_dir, weibo_id, export_format="md"):
         """查找指定微博ID导出文件所在的月份目录(在 年份/月份 目录树中)
@@ -1532,6 +1592,8 @@ class WeiboPCCrawler:
         add_para(f"评论数：{detail['comment_count']}")
         add_para(f"点赞数：{detail['like_count']}")
         add_para(f"保存时间：{detail['save_time']}")
+        if detail.get("ai_quality") is not None:
+            add_para(f"高质量可信度：{detail['ai_quality']}%")
         doc.save(output_path)
 
     @staticmethod
@@ -1651,7 +1713,8 @@ def run_task(user_id, user_name, start_date, end_date,
              keep_browser_open=False, skip_export=False,
              min_interval=3, max_interval=8,
              download_images=False, download_videos=False,
-             export_format="md", skip_existing=False, min_words=0):
+             export_format="md", skip_existing=False, min_words=0,
+             ai_enabled=False, ai_config=None, ai_usage_callback=None):
     """一键爬取任务:收集指定时间范围的微博ID并导出
 
     参数:
@@ -1669,10 +1732,15 @@ def run_task(user_id, user_name, start_date, end_date,
       download_images/videos 是否下载图片/视频
       export_format          导出格式 "md" 或 "docx"
       skip_existing          跳过已存在同ID文件的微博(避免重复抓取)
-      min_words              正文字数低于该值的文章不导出(0=不限制)
+      min_words              正文字数低于该值的文章不导出(0=不限制);
+                             同时用于列表页粗过滤(低于该字数的微博不进详情页)
+      ai_enabled             启用AI实时判断(需 ai_config 已配置API)
+      ai_config              AIConfig 实例;为 None 时尝试读取 ai_config.json
+      ai_usage_callback      token 用量回调(每次AI调用后调用)
 
     返回 dict:
-      {"username", "weibo_ids", "txt_file", "md_dir", "exported", "failed"}
+      {"username", "weibo_ids", "txt_file", "md_dir", "exported", "failed",
+       "skipped", "ai_skipped", "ai_tokens"}
     """
     ensure_logger()
     if not data_root:
@@ -1693,10 +1761,37 @@ def run_task(user_id, user_name, start_date, end_date,
     result = {
         "username": user_name, "weibo_ids": [], "txt_file": None,
         "md_dir": None, "exported": 0, "failed": 0, "skipped": 0,
+        "ai_skipped": 0, "ai_tokens": 0,
     }
 
+    # AI 实时判断: 构建分类器(API 未配置时仅警告,不启用AI)
+    ai_classifier = None
+    user_usage_callback = ai_usage_callback  # 外部传入的token回调
+    ai_tokens = [0]  # 用列表累积,供回调读取
+    if ai_enabled:
+        try:
+            from weibo_ai import AIConfig, AIClient, AIClassifier
+            if ai_config is None:
+                ai_config = AIConfig()
+            if not ai_config.is_configured():
+                logger.warning("启用了AI实时判断,但未配置API Key(ai_config.json),本次不启用AI")
+            else:
+                client = AIClient(ai_config.get("api_key", ""),
+                                  ai_config.get("base_url", ""),
+                                  ai_config.get("model", ""))
+                ai_classifier = AIClassifier(client, ai_config)
+
+                def _ai_usage_cb(delta):
+                    ai_tokens[0] += int(delta or 0)
+                    if user_usage_callback:
+                        user_usage_callback(ai_tokens[0])
+                ai_usage_callback = _ai_usage_cb
+        except Exception as e:
+            logger.warning(f"初始化AI分类器失败,本次不启用AI: {e}")
+            ai_enabled = False
+
     try:
-        # 1. 收集 ID
+        # 1. 收集 ID(列表页按 min_words 粗过滤,低于字数的微博不进详情页)
         username, weibo_ids = crawler.collect_weibo_ids(
             user_id=user_id,
             start_date=start_search,
@@ -1707,6 +1802,7 @@ def run_task(user_id, user_name, start_date, end_date,
             is_text=is_text, is_pic=is_pic,
             is_video=is_video, is_music=is_music,
             user_name=user_name,
+            min_words=min_words,
         )
         if not weibo_ids:
             logger.warning(
@@ -1733,17 +1829,21 @@ def run_task(user_id, user_name, start_date, end_date,
 
         # 3. 导出(新结构: 博主目录/年份/月份/文件,重跑时覆盖同名文件)
         result["md_dir"] = data_dir
-        ok_count, fail_count, skipped_count = crawler.export_markdowns(
+        ok_count, fail_count, skipped_count, ai_skipped_count = crawler.export_markdowns(
             weibo_ids, user_id, result["username"], data_dir,
             progress_callback=progress_callback, overwrite=True,
             month_subdirs=True,
             min_interval=min_interval, max_interval=max_interval,
             download_images=download_images, download_videos=download_videos,
             export_format=export_format, skip_existing=skip_existing,
-            min_words=min_words)
+            min_words=min_words,
+            ai_enabled=ai_enabled, ai_classifier=ai_classifier,
+            ai_config=ai_config, ai_usage_callback=ai_usage_callback)
         result["exported"] = ok_count
         result["failed"] = fail_count
         result["skipped"] = skipped_count
+        result["ai_skipped"] = ai_skipped_count
+        result["ai_tokens"] = ai_tokens[0]
 
     except RuntimeError as e:
         # 预期内的业务错误(如博主该时间段无微博、类名无法确定),只提示不打印堆栈
@@ -1795,6 +1895,12 @@ class ArticleFilter:
     STAT_LABELS = {"repost": "转发", "comment": "评论", "like": "点赞"}
     # md 中的统计行: >转发数：331 / >评论数：225 / >点赞数：5084
     MD_STAT_RE = re.compile(r">(转发数|评论数|点赞数)[:：]\s*([\d.,万亿]+)")
+    # 数据源: 键为 GUI 下拉框取值,值为 AI 分类目录后缀(位于"筛选"文件夹下)
+    AI_SOURCE_LABELS = {
+        "ai_high": "高质量",
+        "ai_ad": "广告",
+        "ai_suspicious": "可疑",
+    }
 
     def __init__(self, data_root=None, filter_root="筛选"):
         self.data_root = data_root or os.path.join(app_dir(), "DataPC")
@@ -1840,17 +1946,50 @@ class ArticleFilter:
             return (year_dirs, n_files)
         return max(candidates, key=weight)
 
-    def scan_files(self, user_id, start_date, end_date, source_format="md"):
+    def _find_ai_dir(self, user_name, source_key):
+        """在筛选文件夹下查找 AI 分类目录(如 筛选/AI_卢诗翰_高质量)
+
+        目录由 AI 筛选功能生成,结构: AI_<博主名>_<类别>/<年份>年/<月份>/
+        返回目录路径;未找到返回 None
+        """
+        label = self.AI_SOURCE_LABELS.get(source_key)
+        if not label:
+            return None
+        target = f"AI_{user_name}_{label}"
+        try:
+            for name in os.listdir(self.filter_root):
+                if name == target and os.path.isdir(os.path.join(self.filter_root, name)):
+                    return os.path.join(self.filter_root, name)
+        except Exception as e:
+            logger.warning(f"查找AI分类目录失败: {e}")
+        return None
+
+    def scan_files(self, user_id, start_date, end_date, source_format="md",
+                   data_source="DataPC", user_name=None):
         """扫描指定博主、日期范围内、指定格式的文章文件
+
+        data_source 为 "DataPC" 时扫描 DataPC/<博主>_<ID> 目录树;
+        为 AI 数据源(ai_high/ai_ad/ai_suspicious)时扫描
+        筛选/AI_<博主名>_<类别> 目录树。
 
         返回 [(file_path, file_date(datetime)), ...]
         """
-        user_dir = self._find_user_dir(user_id)
+        if data_source and data_source != "DataPC":
+            user_dir = self._find_ai_dir(user_name or "", data_source)
+            if not user_dir:
+                logger.warning(
+                    f"未找到AI分类目录: 筛选/AI_{user_name}_{self.AI_SOURCE_LABELS.get(data_source, '')}")
+                return []
+        else:
+            user_dir = self._find_user_dir(user_id)
         if not user_dir:
             return []
 
         start = datetime.strptime(start_date, "%Y-%m-%d") if start_date else None
         end = datetime.strptime(end_date, "%Y-%m-%d") if end_date else None
+        if start and end and start > end:
+            logger.warning(f"扫描范围无效: 开始日期({start_date})晚于结束日期({end_date})")
+            return []
         ext = ".docx" if source_format == "docx" else ".md"
         found = []
         for year_item in sorted(os.listdir(user_dir)):
@@ -1864,10 +2003,13 @@ class ArticleFilter:
                 for f in os.listdir(month_path):
                     if not f.endswith(ext):
                         continue
-                    # 文件名含日期: <博主>_YY-M-D_<mid>.<ext>
-                    fm = re.search(r"_(\d{2,4})-(\d{1,2})-(\d{1,2})_", f)
-                    if not fm:
+                    # 兼容两种文件名: <博主>_<日期>_<ID>.ext 与 <AI标题>_<日期>.ext
+                    # (取最后一个匹配,避免标题中恰好含有类似日期片段)
+                    fms = list(re.finditer(
+                        r"_(\d{2,4})-(\d{1,2})-(\d{1,2})(?=_|\.(?:md|docx)$)", f))
+                    if not fms:
                         continue
+                    fm = fms[-1]
                     year = int(fm.group(1))
                     if year < 100:
                         year += 2000
@@ -1877,6 +2019,15 @@ class ArticleFilter:
                     if end and fdate > end:
                         continue
                     found.append((os.path.join(month_path, f), fdate))
+        if not found:
+            try:
+                n_all = sum(len(fs) for _, _, fs in os.walk(user_dir))
+            except Exception:
+                n_all = 0
+            logger.warning(
+                f"在 {user_dir} 中共 {n_all} 个文件,但未找到 "
+                f"{start_date} ~ {end_date} 的 {ext} 文件"
+                f"(若为AI重命名文件,请确认标题后带有 _年-月-日 日期)")
         return found
 
     # ---------- 统计解析 ----------
@@ -1926,21 +2077,29 @@ class ArticleFilter:
 
     def filter_top(self, user_name, user_id, start_date, end_date,
                    top_n=10, use_repost=True, use_comment=True, use_like=True,
-                   source_format="md", move=False, by_word_count=False):
+                   source_format="md", move=False, by_word_count=False,
+                   data_source="DataPC"):
         """按所选指标排序筛选前 N 篇,复制到"筛选"文件夹
 
         by_word_count=True 时按正文字数排序(忽略转评赞勾选);
         否则按转评赞之和排序。
+        data_source 为 AI 数据源时,从"筛选/AI_<博主>_<类别>"目录中筛选。
 
         返回 dict: {"output_dir", "items": [...], "skipped": [...]}
         """
         ensure_logger()
         # 1. 扫描文件
-        files = self.scan_files(user_id, start_date, end_date, source_format)
+        files = self.scan_files(user_id, start_date, end_date, source_format,
+                                data_source=data_source, user_name=user_name)
         if not files:
-            logger.warning(
-                f"在 {self.data_root} 中未找到博主 {user_name}({user_id}) "
-                f"{start_date} ~ {end_date} 的 {source_format} 文件")
+            if data_source and data_source != "DataPC":
+                logger.warning(
+                    f"在 {self.filter_root} 的 AI_{user_name}_* 目录中未找到 "
+                    f"{start_date} ~ {end_date} 的 {source_format} 文件")
+            else:
+                logger.warning(
+                    f"在 {self.data_root} 中未找到博主 {user_name}({user_id}) "
+                    f"{start_date} ~ {end_date} 的 {source_format} 文件")
             return {"output_dir": None, "items": [], "skipped": []}
 
         # 2. 解析统计并计算得分
@@ -1968,12 +2127,14 @@ class ArticleFilter:
         records.sort(key=lambda r: (-r["score"], -r["date"].timestamp()))
         top = records[:top_n]
 
-        # 4. 创建输出文件夹: 筛选/<博主>_<起>~<止>_热度TOP<N> 或 _字数TOP<N>
+        # 4. 创建输出文件夹: 筛选/<博主名>_<ID>/<起>~<止>_热度TOP<N> 或 _字数TOP<N>
+        #    (先按博主分一层,避免多位博主的结果混在一起)
         os.makedirs(self.filter_root, exist_ok=True)
         metric_tag = "字数" if by_word_count else "热度"
         out_dir = os.path.join(
             self.filter_root,
-            f"{user_name}_{start_date}~{end_date}_{metric_tag}TOP{len(top)}")
+            f"{user_name}_{user_id}",
+            f"{start_date}~{end_date}_{metric_tag}TOP{len(top)}")
         os.makedirs(out_dir, exist_ok=True)
 
         # 5. 复制/移动并重命名(序号前缀体现排名),同步复制图片/视频

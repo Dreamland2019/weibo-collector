@@ -21,7 +21,7 @@ import sys
 import threading
 import tkinter as tk
 from datetime import datetime, timedelta
-from tkinter import messagebox, scrolledtext, ttk
+from tkinter import filedialog, messagebox, scrolledtext, ttk
 
 from weibo_crawler_core import (
     ensure_logger, ClassNameManager, run_task, resource_path, app_dir,
@@ -79,14 +79,16 @@ class WeiboCrawlerGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("微博爬虫 - 收集微博并导出Markdown")
-        self.root.geometry("860x680")
-        self.root.minsize(760, 600)
+        self.root.geometry("900x760")
+        self.root.minsize(780, 640)
 
         self.log_queue = queue.Queue()
         self.manual_req_queue = queue.Queue()   # 后台线程 -> 主线程:请求手动输入类名
         self.manual_resp_queue = queue.Queue()  # 主线程 -> 后台线程:用户输入结果
         self.wait_req_queue = queue.Queue()     # 后台线程 -> 主线程:请求用户完成操作
         self.wait_resp_queue = queue.Queue()    # 主线程 -> 后台线程:用户已确认
+        self.ai_progress_queue = queue.Queue()  # 后台线程 -> 主线程:AI分类进度
+        self._hint_labels = []  # 灰色提示文字列表(随窗口宽度自动换行)
         self.worker = None
         self.running = False
         self.settings = self._load_settings()
@@ -100,6 +102,9 @@ class WeiboCrawlerGUI:
         self.log_handler = LogQueueHandler(self.log_queue)
         self.log_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
         logging.getLogger('weibo_crawler').addHandler(self.log_handler)
+
+        # 窗口宽度变化时,让灰色提示文字自动换行(无需手动拉宽窗口)
+        self.root.bind("<Configure>", self._update_hint_wrap)
 
         # 轮询队列刷新界面
         self._poll_queues()
@@ -147,6 +152,7 @@ class WeiboCrawlerGUI:
             "export_format": self.var_export_format.get(),
             "skip_existing": self.var_skip_existing.get(),
             "min_words": self.var_min_words.get(),
+            "ai_enabled": self.var_ai_enabled.get(),
         }
         # 筛选页设置
         if hasattr(self, "f_var_name"):
@@ -167,6 +173,24 @@ class WeiboCrawlerGUI:
                 "f_format": self.f_var_format.get(),
                 "f_move": self.f_var_move.get(),
                 "f_filter_root": self.f_var_filter_root.get(),
+                "f_source": self.f_var_source.get(),
+                "f_auto_open": self.f_var_auto_open.get(),
+            })
+        # AI筛选页设置(仅表单字段;API/阈值/提示词存 ai_config.json,不重复保存)
+        if hasattr(self, "a_var_name"):
+            data.update({
+                "a_name": self.a_var_name.get(),
+                "a_uid": self.a_var_uid.get(),
+                "a_start_year": self.a_var_start_year.get(),
+                "a_start_month": self.a_var_start_month.get(),
+                "a_start_day": self.a_var_start_day.get(),
+                "a_end_year": self.a_var_end_year.get(),
+                "a_end_month": self.a_var_end_month.get(),
+                "a_end_day": self.a_var_end_day.get(),
+                "a_format": self.a_var_format.get(),
+                "a_summary": self.a_var_summary.get(),
+                "a_keep_source": self.a_var_keep_source.get(),
+                "a_keep_original": self.a_var_keep_original.get(),
             })
         # 类名覆盖
         for key, var in self.class_vars.items():
@@ -199,6 +223,7 @@ class WeiboCrawlerGUI:
         self.var_export_format.set(st.get("export_format", self.var_export_format.get()))
         self.var_skip_existing.set(bool(st.get("skip_existing", False)))
         self.var_min_words.set(st.get("min_words", self.var_min_words.get()))
+        self.var_ai_enabled.set(bool(st.get("ai_enabled", False)))
         # 筛选页设置恢复
         if hasattr(self, "f_var_name"):
             self.f_var_name.set(st.get("f_name", self.f_var_name.get()))
@@ -217,12 +242,61 @@ class WeiboCrawlerGUI:
             self.f_var_format.set(st.get("f_format", self.f_var_format.get()))
             self.f_var_move.set(bool(st.get("f_move", False)))
             self.f_var_filter_root.set(st.get("f_filter_root", self.f_var_filter_root.get()))
+            self.f_var_source.set(st.get("f_source", self.f_var_source.get()))
+            self.f_var_auto_open.set(bool(st.get("f_auto_open", False)))
+        # AI筛选页设置恢复(仅恢复表单字段;API/阈值/提示词以 ai_config.json 为准)
+        if hasattr(self, "a_var_name"):
+            self.a_var_name.set(st.get("a_name", self.a_var_name.get()))
+            self.a_var_uid.set(st.get("a_uid", self.a_var_uid.get()))
+            self.a_var_start_year.set(st.get("a_start_year", self.a_var_start_year.get()))
+            self.a_var_start_month.set(st.get("a_start_month", self.a_var_start_month.get()))
+            self.a_var_start_day.set(st.get("a_start_day", self.a_var_start_day.get()))
+            self.a_var_end_year.set(st.get("a_end_year", self.a_var_end_year.get()))
+            self.a_var_end_month.set(st.get("a_end_month", self.a_var_end_month.get()))
+            self.a_var_end_day.set(st.get("a_end_day", self.a_var_end_day.get()))
+            self.a_var_format.set(st.get("a_format", self.a_var_format.get()))
+            self.a_var_summary.set(bool(st.get("a_summary", True)))
+            self.a_var_keep_source.set(bool(st.get("a_keep_source", True)))
+            self.a_var_keep_original.set(bool(st.get("a_keep_original", False)))
         for key, var in self.class_vars.items():
             val = st.get(f"class_{key}", "")
             if val:
                 var.set(val)
+        # 恢复数据源下拉选项(保存的AI数据源目录可能已不存在)
+        if hasattr(self, "f_source_combo"):
+            self._refresh_source_options()
 
     # ---------- UI 构建 ----------
+
+    def _hint(self, parent, text, pack=None, **label_kw):
+        """创建灰色提示文字,随窗口宽度自动换行(无需手动拉宽窗口)
+
+        pack 为 dict 时传给 pack();label_kw 传给 ttk.Label
+        """
+        lbl = ttk.Label(parent, text=text, foreground="gray", **label_kw)
+        self._hint_labels.append(lbl)
+        if pack:
+            lbl.pack(**pack)
+        return lbl
+
+    def _update_hint_wrap(self, event=None):
+        """窗口宽度变化时,更新所有灰色提示的换行宽度"""
+        try:
+            root_w = self.root.winfo_width()
+            if root_w < 100:
+                return
+            for lbl in self._hint_labels:
+                try:
+                    if not lbl.winfo_exists():
+                        continue
+                    x = lbl.winfo_rootx() - self.root.winfo_rootx()
+                    w = root_w - x - 24
+                    if w > 80:
+                        lbl.configure(wraplength=w)
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     @staticmethod
     def _year_options():
@@ -271,14 +345,16 @@ class WeiboCrawlerGUI:
     def _build_ui(self):
         pad = {"padx": 8, "pady": 4}
 
-        # 主容器: Notebook 双页签(爬取 / 筛选)
+        # 主容器: Notebook 三页签(爬取 / 筛选 / AI筛选)
         self.notebook = ttk.Notebook(self.root)
         self.notebook.pack(fill="both", expand=True, padx=10, pady=(10, 0))
 
         self.tab_crawl = ttk.Frame(self.notebook)
         self.tab_filter = ttk.Frame(self.notebook)
+        self.tab_ai = ttk.Frame(self.notebook)
         self.notebook.add(self.tab_crawl, text="  爬取  ")
         self.notebook.add(self.tab_filter, text="  筛选  ")
+        self.notebook.add(self.tab_ai, text="  AI筛选  ")
 
         # ============ 页签1: 爬取 ============
         t = self.tab_crawl
@@ -317,14 +393,19 @@ class WeiboCrawlerGUI:
         self.var_end_day = tk.StringVar(value=st.get("end_day", ""))
         self._build_date_picker(row2, self.var_end_year, self.var_end_month,
                                 self.var_end_day, None)
-        ttk.Label(row2, text="  (年份可手动输入,日随年月自动调整)",
-                  foreground="gray").pack(side="left", padx=6)
+        ttk.Button(row2, text="打开月份文件夹",
+                   command=lambda: self._open_month_dir(
+                       self.var_name.get(), self.var_uid.get(),
+                       self.var_start_year, self.var_start_month)
+                   ).pack(side="left", padx=(10, 0))
+        self._hint(row2, "  (年份可手动输入,日随年月自动调整)",
+                   pack=dict(side="left", padx=6))
 
         # 日期行下方的建议提示小字
         row2tip = ttk.Frame(frame_top)
         row2tip.pack(fill="x", pady=(2, 0))
-        ttk.Label(row2tip, text="建议先按 1 个月范围并显示浏览器进行爬取试验,再逐步扩大范围。",
-                  foreground="gray", font=("", 9)).pack(anchor="w")
+        self._hint(row2tip, "建议先按 1 个月范围并显示浏览器进行爬取试验,再逐步扩大范围。",
+                   pack=dict(anchor="w"), font=("", 9))
 
         # 任务参数区: 常用选项(下载图片/视频、导出格式、跳过已爬取、无头模式)
         row2b = ttk.Frame(frame_top)
@@ -343,10 +424,23 @@ class WeiboCrawlerGUI:
         self.var_skip_existing = tk.BooleanVar(value=True)
         ttk.Checkbutton(row2c, text="跳过已爬取的文章(按微博ID去重)",
                         variable=self.var_skip_existing).pack(side="left")
-        ttk.Label(row2c, text="  (重新爬取时,已存在同ID文件的不再抓取)",
-                  foreground="gray").pack(side="left", padx=(4, 16))
+        self._hint(row2c, "  (重新爬取时,已存在同ID文件的不再抓取)",
+                   pack=dict(side="left", padx=(4, 16)))
         self.var_headless = tk.BooleanVar(value=False)
         ttk.Checkbutton(row2c, text="无头模式(不显示浏览器)", variable=self.var_headless).pack(side="left")
+
+        # AI 实时判断(任务参数最后一行;API 在"AI筛选"页签配置)
+        row2d = ttk.Frame(frame_top)
+        row2d.pack(fill="x", pady=(6, 0))
+        self.var_ai_enabled = tk.BooleanVar(value=False)
+        ttk.Checkbutton(row2d, text="启用AI实时判断",
+                        variable=self.var_ai_enabled).pack(side="left")
+        self.btn_ai_test = ttk.Button(row2d, text="测试连接",
+                                      command=lambda: self._test_ai_connection(self.btn_ai_test))
+        self.btn_ai_test.pack(side="left", padx=8)
+        self._hint(row2d, "(逐篇调用AI判断“高质量可信度”,低于阈值不导出也不下载媒体;"
+                          "API配置在“AI筛选”页签,此处测试的是已保存的配置)",
+                   pack=dict(side="left"))
 
         # 高级设置
         frame_adv = ttk.LabelFrame(t, text="高级设置", padding=10)
@@ -376,8 +470,8 @@ class WeiboCrawlerGUI:
         self.var_max_interval = tk.StringVar(value="8")
         ttk.Spinbox(row4b, from_=1, to=120, textvariable=self.var_max_interval,
                     width=4).pack(side="left", padx=2)
-        ttk.Label(row4b, text="秒  (提示:勿设置过短,避免触发风控)",
-                  foreground="gray").pack(side="left", padx=6)
+        self._hint(row4b, "秒  (提示:勿设置过短,避免触发风控)",
+                   pack=dict(side="left", padx=6))
 
         # 最低正文字数过滤(0=不限制)
         row4e = ttk.Frame(frame_adv)
@@ -386,13 +480,13 @@ class WeiboCrawlerGUI:
         self.var_min_words = tk.StringVar(value="0")
         ttk.Spinbox(row4e, from_=0, to=100000, textvariable=self.var_min_words,
                     width=6).pack(side="left", padx=4)
-        ttk.Label(row4e, text="字符  (正文低于该字数的文章不导出;0=不限制)",
-                  foreground="gray").pack(side="left")
+        self._hint(row4e, "字符  (正文低于该字数的文章不导出;0=不限制)",
+                   pack=dict(side="left"))
 
         # 类名覆盖
         row5 = ttk.Frame(frame_adv)
         row5.pack(fill="x", pady=(6, 0))
-        ttk.Label(row5, text="类名覆盖(留空则自动识别):", foreground="gray").pack(anchor="w")
+        self._hint(row5, "类名覆盖(留空则自动识别):", pack=dict(anchor="w"))
         self.class_vars = {}
         grid = ttk.Frame(frame_adv)
         grid.pack(fill="x", pady=(4, 0))
@@ -449,6 +543,11 @@ class WeiboCrawlerGUI:
         self.f_var_end_day = tk.StringVar(value="")
         self._build_date_picker(frow2, self.f_var_end_year, self.f_var_end_month,
                                 self.f_var_end_day, None)
+        ttk.Button(frow2, text="打开月份文件夹",
+                   command=lambda: self._open_month_dir(
+                       self.f_var_name.get(), self.f_var_uid.get(),
+                       self.f_var_start_year, self.f_var_start_month)
+                   ).pack(side="left", padx=(10, 0))
 
         frow3 = ttk.Frame(frame_f1)
         frow3.pack(fill="x", pady=(8, 0))
@@ -474,8 +573,8 @@ class WeiboCrawlerGUI:
         ttk.Checkbutton(frow3b, text="评论", variable=self.f_var_use_comment).pack(side="left", padx=6)
         self.f_var_use_like = tk.BooleanVar(value=True)
         ttk.Checkbutton(frow3b, text="点赞", variable=self.f_var_use_like).pack(side="left", padx=6)
-        ttk.Label(frow3b, text="  (选择\"正文字数\"时此三项忽略)",
-                  foreground="gray").pack(side="left", padx=6)
+        self._hint(frow3b, "  (选择\"正文字数\"时此三项忽略)",
+                   pack=dict(side="left", padx=6))
 
         frow4 = ttk.Frame(frame_f1)
         frow4.pack(fill="x", pady=(8, 0))
@@ -488,20 +587,558 @@ class WeiboCrawlerGUI:
         self.f_var_filter_root = tk.StringVar(value="筛选")
         ttk.Label(frow4, text="输出文件夹:").pack(side="left", padx=(16, 0))
         ttk.Entry(frow4, textvariable=self.f_var_filter_root, width=14).pack(side="left", padx=4)
-        ttk.Label(frow4, text="(在程序目录下)", foreground="gray").pack(side="left")
+        self._hint(frow4, "(在程序目录下)", pack=dict(side="left"))
+
+        # 数据源: 爬取数据(DataPC) 或 AI分类结果(目录存在时显示)
+        frow4b = ttk.Frame(frame_f1)
+        frow4b.pack(fill="x", pady=(4, 0))
+        ttk.Label(frow4b, text="数据源:").pack(side="left")
+        self.f_var_source = tk.StringVar(value="DataPC")
+        self.f_source_combo = ttk.Combobox(frow4b, textvariable=self.f_var_source,
+                                           width=18, state="readonly")
+        self.f_source_combo.pack(side="left", padx=4)
+        self._f_source_display_map = {"DataPC": "爬取数据(DataPC)"}
+        self._hint(frow4b, "(选择AI分类结果时,从“筛选/AI_博主_类别”目录中筛选)",
+                   pack=dict(side="left", padx=4))
+
+        def on_source_select(event):
+            disp = self.f_var_source.get()
+            for key, d in self._f_source_display_map.items():
+                if d == disp:
+                    self.f_var_source.set(key)
+                    return
+
+        self.f_source_combo.bind("<<ComboboxSelected>>", on_source_select)
+        self.f_var_filter_root.trace_add(
+            "write", lambda *a: self._refresh_source_options())
+        self._refresh_source_options()
+
+        # 最后一行: 筛选后自动打开输出文件夹 + 打开当前筛选任务文件夹
+        frow5 = ttk.Frame(frame_f1)
+        frow5.pack(fill="x", pady=(4, 0))
+        self.f_var_auto_open = tk.BooleanVar(value=False)
+        ttk.Checkbutton(frow5, text="筛选完成后自动打开输出文件夹",
+                        variable=self.f_var_auto_open).pack(side="left")
+        ttk.Button(frow5, text="打开当前筛选任务文件夹",
+                   command=self._open_current_filter_dir).pack(side="left", padx=10)
 
         frame_fbtn = ttk.Frame(f)
         frame_fbtn.pack(fill="x", padx=10, pady=8)
         self.btn_filter = ttk.Button(frame_fbtn, text="开始筛选", command=self._start_filter)
         self.btn_filter.pack(side="left")
-        ttk.Label(frame_fbtn, text=" 说明: 对本地已爬取数据按所选指标之和排序,取前N篇复制到“筛选”文件夹,文件名加排名序号",
-                  foreground="gray").pack(side="left", padx=8)
+        self._hint(frame_fbtn, " 说明: 对本地已爬取数据按所选指标之和排序,取前N篇复制到“筛选”文件夹,文件名加排名序号",
+                   pack=dict(side="left", padx=8))
+
+        # ============ 页签3: AI筛选 ============
+        self._build_ai_tab()
 
         # ============ 日志区(两个页签共用) ============
         frame_log = ttk.LabelFrame(self.root, text="运行日志", padding=6)
         frame_log.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        log_btns = ttk.Frame(frame_log)
+        log_btns.pack(side="right", fill="y", padx=(0, 4))
+        self.btn_open_data = ttk.Button(log_btns, text="打开数据目录",
+                                        command=self._open_data_root)
+        self.btn_open_data.pack(side="top", pady=(0, 4))
+        self.btn_export_log = ttk.Button(log_btns, text="导出日志",
+                                         command=self._export_log)
+        self.btn_export_log.pack(side="top")
         self.txt_log = scrolledtext.ScrolledText(frame_log, height=14, state="disabled", wrap="word")
         self.txt_log.pack(fill="both", expand=True)
+
+    # ---------- AI筛选页签 ----------
+
+    def _build_ai_tab(self):
+        """构建"AI筛选"页签: API设置 / 判断阈值 / AI提示词 / 事后AI分类"""
+        # AI页签内容较多,包一层可滚动画布
+        self.ai_canvas = tk.Canvas(self.tab_ai, highlightthickness=0)
+        self.ai_scroll = ttk.Scrollbar(self.tab_ai, orient="vertical",
+                                       command=self.ai_canvas.yview)
+        self.ai_inner = ttk.Frame(self.ai_canvas)
+        self.ai_inner.bind(
+            "<Configure>",
+            lambda e: self.ai_canvas.configure(
+                scrollregion=self.ai_canvas.bbox("all")))
+        self.ai_canvas.create_window((0, 0), window=self.ai_inner, anchor="nw")
+        self.ai_canvas.configure(yscrollcommand=self.ai_scroll.set)
+        self.ai_canvas.pack(side="left", fill="both", expand=True)
+        self.ai_scroll.pack(side="right", fill="y")
+
+        def _on_canvas_resize(event):
+            self.ai_canvas.itemconfigure("all", width=event.width)
+
+        self.ai_canvas.bind("<Configure>", _on_canvas_resize)
+
+        def _on_enter(_e):
+            self.ai_canvas.bind_all("<MouseWheel>", _on_wheel)
+
+        def _on_leave(_e):
+            self.ai_canvas.unbind_all("<MouseWheel>")
+
+        def _on_wheel(event):
+            self.ai_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        self.ai_canvas.bind("<Enter>", _on_enter)
+        self.ai_canvas.bind("<Leave>", _on_leave)
+
+        a = self.ai_inner
+
+        # ---- API设置 ----
+        frame_api = ttk.LabelFrame(a, text="API设置(OpenAI兼容接口)", padding=10)
+        frame_api.pack(fill="x", padx=10, pady=(10, 4))
+
+        # API/阈值/提示词以 ai_config.json 为准(不存在时用默认值)
+        from weibo_ai import AIConfig, DEFAULT_SYSTEM_PROMPT
+        _ai_cfg = AIConfig()
+
+        api_row1 = ttk.Frame(frame_api)
+        api_row1.pack(fill="x")
+        ttk.Label(api_row1, text="API Key:").pack(side="left")
+        self.a_var_api_key = tk.StringVar(value=_ai_cfg.get("api_key", ""))
+        self.a_entry_key = ttk.Entry(api_row1, textvariable=self.a_var_api_key,
+                                     width=40, show="*")
+        self.a_entry_key.pack(side="left", padx=4)
+        self.a_btn_show_key = ttk.Button(api_row1, text="显示", width=5,
+                                         command=self._a_toggle_key)
+        self.a_btn_show_key.pack(side="left")
+        self.a_btn_save = ttk.Button(api_row1, text="保存配置",
+                                     command=self._a_save_config)
+        self.a_btn_save.pack(side="left", padx=8)
+        self._hint(api_row1, "(DeepSeek/通义/Kimi等OpenAI兼容服务均可,密钥保存在程序目录ai_config.json)",
+                   pack=dict(side="left"))
+
+        api_row2 = ttk.Frame(frame_api)
+        api_row2.pack(fill="x", pady=(6, 0))
+        ttk.Label(api_row2, text="接口地址:").pack(side="left")
+        self.a_var_base_url = tk.StringVar(
+            value=_ai_cfg.get("base_url", "https://api.deepseek.com"))
+        ttk.Entry(api_row2, textvariable=self.a_var_base_url,
+                  width=32).pack(side="left", padx=4)
+        ttk.Label(api_row2, text="模型:").pack(side="left", padx=(12, 0))
+        self.a_var_model = tk.StringVar(
+            value=_ai_cfg.get("model", "deepseek-v4-flash"))
+        ttk.Entry(api_row2, textvariable=self.a_var_model,
+                  width=22).pack(side="left", padx=4)
+        self.a_btn_test = ttk.Button(api_row2, text="测试连接",
+                                     command=self._a_test_connection)
+        self.a_btn_test.pack(side="left", padx=8)
+
+        # ---- 判断阈值 ----
+        frame_thr = ttk.LabelFrame(a, text="判断阈值", padding=10)
+        frame_thr.pack(fill="x", padx=10, pady=4)
+
+        thr_row1 = ttk.Frame(frame_thr)
+        thr_row1.pack(fill="x")
+        ttk.Label(thr_row1, text="高质量可信度阈值:").pack(side="left")
+        self.a_var_quality = tk.StringVar(
+            value=str(_ai_cfg.get("quality_threshold", 80)))
+        ttk.Spinbox(thr_row1, from_=0, to=100, textvariable=self.a_var_quality,
+                    width=4).pack(side="left", padx=2)
+        self._hint(thr_row1, "%   (爬取页启用AI实时判断时,低于此值不导出)",
+                   pack=dict(side="left"))
+
+        thr_row2 = ttk.Frame(frame_thr)
+        thr_row2.pack(fill="x", pady=(4, 0))
+        ttk.Label(thr_row2, text="广告概率阈值:").pack(side="left")
+        self.a_var_ad = tk.StringVar(value=str(_ai_cfg.get("ad_threshold", 70)))
+        ttk.Spinbox(thr_row2, from_=0, to=100, textvariable=self.a_var_ad,
+                    width=4).pack(side="left", padx=2)
+        ttk.Label(thr_row2, text="%   可疑下界:").pack(side="left", padx=(14, 0))
+        self.a_var_susp = tk.StringVar(
+            value=str(_ai_cfg.get("suspicious_low", 30)))
+        ttk.Spinbox(thr_row2, from_=0, to=100, textvariable=self.a_var_susp,
+                    width=4).pack(side="left", padx=2)
+        self._hint(thr_row2,
+                   "%   (事后分类: 广告概率≥广告阈值→广告; ≥可疑下界→可疑; "
+                   "高质量可信度≥阈值→高质量; 其余→其他低质量)",
+                   pack=dict(side="left"))
+
+        # ---- AI提示词 ----
+        frame_prompt = ttk.LabelFrame(a, text="AI提示词(可自定义,点击\"恢复默认\"还原)", padding=10)
+        frame_prompt.pack(fill="x", padx=10, pady=4)
+        self.a_txt_prompt = tk.Text(frame_prompt, height=5, wrap="word",
+                                    font=("Microsoft YaHei UI", 9))
+        self.a_txt_prompt.pack(fill="x")
+        saved_prompt = (_ai_cfg.get("system_prompt") or "").strip()
+        self.a_txt_prompt.insert("1.0", saved_prompt or DEFAULT_SYSTEM_PROMPT)
+        self.a_btn_restore = ttk.Button(frame_prompt, text="恢复默认提示词",
+                                        command=self._a_restore_prompts)
+        self.a_btn_restore.pack(anchor="e", pady=(4, 0))
+
+        # ---- 事后AI分类 ----
+        frame_run = ttk.LabelFrame(a, text="事后AI分类(扫描本地文章→AI判断→按类移动到“筛选/AI_博主_类别”)",
+                                   padding=10)
+        frame_run.pack(fill="x", padx=10, pady=4)
+
+        run_row1 = ttk.Frame(frame_run)
+        run_row1.pack(fill="x")
+        ttk.Label(run_row1, text="博主昵称:").pack(side="left")
+        self.a_var_name = tk.StringVar(value="卢诗翰")
+        self.a_name_combo = ttk.Combobox(run_row1, textvariable=self.a_var_name, width=16)
+        self.a_name_combo.pack(side="left", padx=(4, 8))
+        ttk.Label(run_row1, text="微博ID:").pack(side="left")
+        self.a_var_uid = tk.StringVar(value="3276099007")
+        ttk.Entry(run_row1, textvariable=self.a_var_uid, width=14).pack(side="left", padx=4)
+        ttk.Button(run_row1, text="打开博主记录",
+                   command=self._open_blogger_record).pack(side="left", padx=(8, 2))
+        ttk.Button(run_row1, text="刷新", command=lambda: self._reload_blogger_names(
+            self.a_name_combo, self.a_var_uid, self.a_var_name)).pack(side="left")
+        self._load_blogger_names(self.a_name_combo, self.a_var_uid, self.a_var_name)
+
+        run_row2 = ttk.Frame(frame_run)
+        run_row2.pack(fill="x", pady=(8, 0))
+        ttk.Label(run_row2, text="开始日期:").pack(side="left")
+        self.a_var_start_year = tk.StringVar(value="")
+        self.a_var_start_month = tk.StringVar(value="")
+        self.a_var_start_day = tk.StringVar(value="")
+        self._build_date_picker(run_row2, self.a_var_start_year, self.a_var_start_month,
+                                self.a_var_start_day, None, reset_day_on_month=True)
+        ttk.Label(run_row2, text="  结束日期:").pack(side="left")
+        self.a_var_end_year = tk.StringVar(value="")
+        self.a_var_end_month = tk.StringVar(value="")
+        self.a_var_end_day = tk.StringVar(value="")
+        self._build_date_picker(run_row2, self.a_var_end_year, self.a_var_end_month,
+                                self.a_var_end_day, None)
+        ttk.Label(run_row2, text="数据格式:").pack(side="left", padx=(16, 0))
+        self.a_var_format = tk.StringVar(value="md")
+        ttk.Combobox(run_row2, textvariable=self.a_var_format, values=["md", "docx"],
+                     width=5, state="readonly").pack(side="left", padx=4)
+
+        run_row3 = ttk.Frame(frame_run)
+        run_row3.pack(fill="x", pady=(8, 0))
+        self.a_var_summary = tk.BooleanVar(value=True)
+        ttk.Checkbutton(run_row3, text="启用AI总结(生成标题)",
+                        variable=self.a_var_summary).pack(side="left")
+        self.a_var_keep_source = tk.BooleanVar(value=True)
+        ttk.Checkbutton(run_row3, text="保留原文件(默认勾选,不移动)",
+                        variable=self.a_var_keep_source).pack(side="left", padx=10)
+        self.a_var_keep_original = tk.BooleanVar(value=False)
+        ttk.Checkbutton(run_row3, text="保留原标题(不勾选则重命名为“AI标题_年-月-日”)",
+                        variable=self.a_var_keep_original).pack(side="left", padx=10)
+        self._hint(run_row3, "(总结标题写入各类别目录的 AI总结.txt)",
+                   pack=dict(side="left"))
+
+        run_row4 = ttk.Frame(frame_run)
+        run_row4.pack(fill="x", pady=(8, 0))
+        self.btn_ai = ttk.Button(run_row4, text="开始AI分类",
+                                 command=self._start_ai_classify)
+        self.btn_ai.pack(side="left")
+        self.btn_ai_clear = ttk.Button(run_row4, text="清空进度",
+                                       command=self._a_clear_progress)
+        self.btn_ai_clear.pack(side="left", padx=6)
+        self.a_progress = ttk.Progressbar(run_row4, length=260, mode="determinate")
+        self.a_progress.pack(side="left", padx=10)
+        self.a_lbl_progress = ttk.Label(run_row4, text="")
+        self.a_lbl_progress.pack(side="left", padx=4)
+        self.btn_ai_open = ttk.Button(run_row4, text="打开输出文件夹",
+                                      command=self._a_open_output_dir)
+        self.btn_ai_open.pack(side="left", padx=6)
+
+        run_row5 = ttk.Frame(frame_run)
+        run_row5.pack(fill="x", pady=(4, 0))
+        self.a_lbl_tokens = ttk.Label(run_row5, text="已消耗 tokens: 0",
+                                      foreground="blue")
+        self.a_lbl_tokens.pack(side="left")
+        self.a_lbl_counts = ttk.Label(run_row5, text="")
+        self.a_lbl_counts.pack(side="left", padx=16)
+
+    def _a_toggle_key(self):
+        """显示/隐藏 API Key"""
+        if self.a_entry_key.cget("show") == "*":
+            self.a_entry_key.configure(show="")
+            self.a_btn_show_key.configure(text="隐藏")
+        else:
+            self.a_entry_key.configure(show="*")
+            self.a_btn_show_key.configure(text="显示")
+
+    def _a_save_config(self):
+        """保存 AI 配置到 ai_config.json"""
+        try:
+            from weibo_ai import AIConfig
+            cfg = AIConfig()
+            cfg.data.update({
+                "api_key": self.a_var_api_key.get().strip(),
+                "base_url": self.a_var_base_url.get().strip() or "https://api.deepseek.com",
+                "model": self.a_var_model.get().strip() or "deepseek-v4-flash",
+                "quality_threshold": self._a_int(self.a_var_quality.get(), 80),
+                "ad_threshold": self._a_int(self.a_var_ad.get(), 70),
+                "suspicious_low": self._a_int(self.a_var_susp.get(), 30),
+                "system_prompt": self.a_txt_prompt.get("1.0", "end").strip(),
+            })
+            if cfg.save():
+                self._append_log(f"AI配置已保存到: {cfg.config_path}")
+                self._save_settings()
+            else:
+                messagebox.showerror("保存失败", "AI配置保存失败,请检查程序目录权限")
+        except Exception as e:
+            logger.error(f"保存AI配置失败: {e}")
+            messagebox.showerror("保存失败", f"保存AI配置失败:\n{e}")
+
+    @staticmethod
+    def _a_int(text, default):
+        try:
+            return max(0, min(100, int(float(text))))
+        except (TypeError, ValueError):
+            return default
+
+    def _a_restore_prompts(self):
+        """恢复默认提示词"""
+        from weibo_ai import DEFAULT_SYSTEM_PROMPT
+        self.a_txt_prompt.delete("1.0", "end")
+        self.a_txt_prompt.insert("1.0", DEFAULT_SYSTEM_PROMPT)
+        self._append_log("已恢复默认提示词")
+
+    def _a_test_connection(self):
+        """AI页: 用当前输入框内容测试连接"""
+        self._test_ai_connection(
+            self.a_btn_test,
+            key=self.a_var_api_key.get().strip(),
+            base=self.a_var_base_url.get().strip(),
+            model=self.a_var_model.get().strip())
+
+    def _test_ai_connection(self, btn, key=None, base=None, model=None):
+        """测试 API 连接(后台线程执行);key/base/model 为 None 时读取已保存配置"""
+        if key is None:
+            try:
+                from weibo_ai import AIConfig
+                cfg = AIConfig()
+                key = cfg.get("api_key", "")
+                base = cfg.get("base_url", "")
+                model = cfg.get("model", "")
+            except Exception as e:
+                messagebox.showerror("读取配置失败", f"读取AI配置失败:\n{e}")
+                return
+        key = (key or "").strip()
+        if not key:
+            messagebox.showwarning("未配置", "请先在“AI筛选”页签填写 API Key 并点击“保存配置”")
+            return
+        base = (base or "").strip() or "https://api.deepseek.com"
+        model = (model or "").strip() or "deepseek-v4-flash"
+        btn.configure(state="disabled")
+
+        def work():
+            try:
+                from weibo_ai import AIClient
+                client = AIClient(key, base, model, timeout=30)
+                text, usage = client.chat("你是测试助手。", "请回复:连接成功", temperature=0)
+                msg = (f"连接成功!\n接口: {base}\n模型: {model}\n"
+                       f"回复: {text[:100]}\n消耗: {usage.get('total_tokens', '?')} tokens")
+                self.root.after(0, self._ai_test_done, btn, msg)
+            except Exception as e:
+                self.root.after(0, self._ai_test_done, btn, f"连接失败:\n{e}")
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _ai_test_done(self, btn, msg):
+        btn.configure(state="normal")
+        self._append_log("AI连接测试: " + msg.splitlines()[0])
+        messagebox.showinfo("测试连接", msg, parent=self.root)
+
+    def _a_open_output_dir(self):
+        """打开当前AI分类任务的输出文件夹(筛选目录,内含 AI_博主_类别 子目录)"""
+        try:
+            root_dir = self._resolve_filter_root()
+            os.makedirs(root_dir, exist_ok=True)
+            os.startfile(root_dir)
+            self._append_log(f"已打开AI分类输出文件夹: {root_dir}")
+        except Exception as e:
+            logger.error(f"打开AI分类输出文件夹失败: {e}")
+            messagebox.showerror("打开失败", f"无法打开文件夹:\n{e}", parent=self.root)
+
+    def _a_clear_progress(self):
+        """清空当前博主的AI分类进度(切换选项后想全部重跑时使用)"""
+        uid = self.a_var_uid.get().strip()
+        if not uid:
+            messagebox.showwarning("提示", "请先填写微博ID", parent=self.root)
+            return
+        path = os.path.join(self._resolve_filter_root(), f"ai_progress_{uid}.json")
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+                self._append_log(f"已清空AI分类进度: {path}")
+            else:
+                self._append_log("没有找到进度文件,无需清空")
+        except Exception as e:
+            logger.warning(f"清空AI进度失败: {e}")
+
+    def _start_ai_classify(self):
+        """事后AI分类: 校验参数并启动后台线程"""
+        name = self.a_var_name.get().strip()
+        uid = self.a_var_uid.get().strip()
+        try:
+            start = (f"{int(self.a_var_start_year.get()):04d}-"
+                     f"{int(self.a_var_start_month.get()):02d}-"
+                     f"{int(self.a_var_start_day.get()):02d}")
+            end = (f"{int(self.a_var_end_year.get()):04d}-"
+                   f"{int(self.a_var_end_month.get()):02d}-"
+                   f"{int(self.a_var_end_day.get()):02d}")
+        except (ValueError, TypeError):
+            messagebox.showwarning("日期错误", "请选择有效的AI分类开始/结束日期")
+            return
+        if start > end:
+            messagebox.showwarning(
+                "日期错误",
+                f"开始日期({start})不能晚于结束日期({end}),请检查年月日是否填反")
+            return
+        if not (name and uid):
+            messagebox.showwarning("参数不完整", "请填写博主昵称和微博ID")
+            return
+
+        # 保存AI配置(API/阈值/提示词)
+        from weibo_ai import AIConfig
+        cfg = AIConfig()
+        cfg.data.update({
+            "api_key": self.a_var_api_key.get().strip(),
+            "base_url": self.a_var_base_url.get().strip() or "https://api.deepseek.com",
+            "model": self.a_var_model.get().strip() or "deepseek-v4-flash",
+            "quality_threshold": self._a_int(self.a_var_quality.get(), 80),
+            "ad_threshold": self._a_int(self.a_var_ad.get(), 70),
+            "suspicious_low": self._a_int(self.a_var_susp.get(), 30),
+            "system_prompt": self.a_txt_prompt.get("1.0", "end").strip(),
+        })
+        if not cfg.is_configured():
+            messagebox.showwarning("未配置API", "请先在“API设置”中填写 API Key 并保存配置")
+            return
+        cfg.save()
+
+        self._save_settings()
+        self._remember_blogger(uid, name)
+        self.btn_ai.configure(state="disabled")
+        self._append_log("=" * 60)
+        self._append_log(f"开始AI分类: 博主={name}({uid}), 时间={start} ~ {end}, "
+                         f"格式={self.a_var_format.get()}")
+
+        kwargs = {
+            "user_name": name,
+            "user_id": uid,
+            "start_date": start,
+            "end_date": end,
+            "source_format": self.a_var_format.get(),
+            "summary_enabled": self.a_var_summary.get(),
+            "keep_source": self.a_var_keep_source.get(),
+            "keep_original": self.a_var_keep_original.get(),
+            "filter_root": self._resolve_filter_root(),
+            "cfg": cfg,
+        }
+        threading.Thread(target=self._run_ai_worker, args=(kwargs,), daemon=True).start()
+
+    def _run_ai_worker(self, kwargs):
+        try:
+            from weibo_ai import AIClient, AIClassifier, AIRunner
+            cfg = kwargs.pop("cfg")
+            client = AIClient(cfg.get("api_key", ""), cfg.get("base_url", ""),
+                              cfg.get("model", ""))
+            classifier = AIClassifier(client, cfg)
+            runner = AIRunner(classifier, filter_root=kwargs["filter_root"])
+
+            def progress_cb(i, total, wid):
+                self.ai_progress_queue.put(("progress", i, total, wid))
+
+            def usage_cb(tokens):
+                self.ai_progress_queue.put(("tokens", tokens))
+
+            result = runner.run(
+                kwargs["user_name"], kwargs["user_id"],
+                kwargs["start_date"], kwargs["end_date"],
+                source_format=kwargs["source_format"],
+                keep_source=kwargs.get("keep_source", True),
+                summary_enabled=kwargs["summary_enabled"],
+                keep_original=kwargs.get("keep_original", False),
+                progress_callback=progress_cb, usage_callback=usage_cb)
+            if result["total"] == 0:
+                msg = ("\nAI分类未执行: 未找到符合条件的本地文章。\n"
+                       "请检查博主/日期范围/数据格式,确认已先爬取数据。")
+            else:
+                msg = (f"\nAI分类完成: 共 {result['total']} 篇\n"
+                       f"高质量 {result['high']} | 广告 {result['ad']} | "
+                       f"可疑 {result['suspicious']} | 其他低质量 {result['low']} | "
+                       f"失败 {result['failed']}\n"
+                       f"消耗 tokens: {result['tokens']}\n"
+                       f"输出目录: {os.path.join(kwargs['filter_root'], 'AI_' + kwargs['user_name'] + '_*')}")
+            self.root.after(0, self._on_ai_finish, msg, result)
+        except Exception as e:
+            logger.error(f"AI分类异常: {e}", exc_info=True)
+            self.root.after(0, self._on_ai_finish, f"\nAI分类异常终止: {e}", None)
+
+    def _on_ai_finish(self, msg, result):
+        self._append_log(msg)
+        self.btn_ai.configure(state="normal")
+        self.a_progress.configure(value=0)
+        if result:
+            self.a_lbl_tokens.configure(text=f"已消耗 tokens: {result['tokens']}")
+            self.a_lbl_counts.configure(
+                text=f"高质量{result['high']} 广告{result['ad']} "
+                     f"可疑{result['suspicious']} 低质量{result['low']} 失败{result['failed']}")
+        self._refresh_source_options()
+        messagebox.showinfo("AI分类完成" if result and result["total"] else "AI分类",
+                            msg, parent=self.root)
+
+    def _refresh_source_options(self):
+        """根据筛选目录下已有的 AI 分类文件夹刷新筛选页"数据源"下拉"""
+        try:
+            labels = {"ai_high": "高质量", "ai_ad": "广告", "ai_suspicious": "可疑"}
+            filter_root = self._resolve_filter_root()
+            values = ["DataPC"]
+            if os.path.isdir(filter_root):
+                for key, label in labels.items():
+                    for name in os.listdir(filter_root):
+                        if (name.startswith("AI_") and name.endswith(f"_{label}")
+                                and os.path.isdir(os.path.join(filter_root, name))):
+                            values.append(key)
+                            break
+            display_map = {v: ("爬取数据(DataPC)" if v == "DataPC"
+                               else f"AI-{labels[v]}") for v in values}
+            self._f_source_display_map = display_map
+            self.f_source_combo.configure(values=list(display_map.values()))
+            cur = self.f_var_source.get()
+            if cur not in values:
+                self.f_var_source.set("DataPC")
+        except Exception as e:
+            logger.warning(f"刷新数据源选项失败: {e}")
+
+    def _resolve_filter_root(self):
+        """把筛选页"输出文件夹"解析为绝对路径(相对路径以程序目录为基准)"""
+        root = self.f_var_filter_root.get().strip() or "筛选"
+        if not os.path.isabs(root):
+            root = os.path.join(app_dir(), root)
+        return root
+
+    def _open_current_filter_dir(self):
+        """打开当前筛选表单对应的输出文件夹(按博主/日期/指标匹配,容忍实际TOP数)"""
+        try:
+            name = self.f_var_name.get().strip()
+            uid = self.f_var_uid.get().strip()
+            start = (f"{int(self.f_var_start_year.get()):04d}-"
+                     f"{int(self.f_var_start_month.get()):02d}-"
+                     f"{int(self.f_var_start_day.get()):02d}")
+            end = (f"{int(self.f_var_end_year.get()):04d}-"
+                   f"{int(self.f_var_end_month.get()):02d}-"
+                   f"{int(self.f_var_end_day.get()):02d}")
+        except (ValueError, TypeError):
+            messagebox.showwarning("日期错误", "请先选择有效的筛选日期", parent=self.root)
+            return
+        if not (name and uid):
+            messagebox.showwarning("参数不完整", "请先填写博主昵称和微博ID", parent=self.root)
+            return
+        try:
+            filter_root = self._resolve_filter_root()
+            blogger_dir = os.path.join(filter_root, f"{name}_{uid}")
+            prefix = f"{start}~{end}_"
+            if os.path.isdir(blogger_dir):
+                cands = [os.path.join(blogger_dir, d) for d in os.listdir(blogger_dir)
+                         if d.startswith(prefix) and os.path.isdir(os.path.join(blogger_dir, d))]
+                if cands:
+                    target = max(cands, key=os.path.getmtime)
+                    os.startfile(target)
+                    self._append_log(f"已打开筛选结果文件夹: {target}")
+                    return
+            messagebox.showinfo(
+                "未找到",
+                f"未找到该筛选任务的输出文件夹:\n{blogger_dir}\n\n"
+                f"请先执行筛选(条件: {start} ~ {end})", parent=self.root)
+        except Exception as e:
+            logger.error(f"打开当前筛选任务文件夹失败: {e}")
+            messagebox.showerror("打开失败", f"无法打开文件夹:\n{e}", parent=self.root)
 
     # ---------- 博主记录文件 ----------
 
@@ -582,6 +1219,71 @@ class WeiboCrawlerGUI:
         self.txt_log.see("end")
         self.txt_log.configure(state="disabled")
 
+    def _open_data_root(self):
+        """打开 DataPC 数据根目录"""
+        try:
+            data_root = os.path.join(app_dir(), "DataPC")
+            os.makedirs(data_root, exist_ok=True)
+            os.startfile(data_root)
+            self._append_log(f"已打开数据目录: {data_root}")
+        except Exception as e:
+            logger.error(f"打开数据目录失败: {e}")
+            messagebox.showerror("打开失败", f"无法打开数据目录:\n{e}", parent=self.root)
+
+    def _open_month_dir(self, name, uid, year_var, month_var):
+        """打开指定博主在所选年月的文件夹;不存在时逐级回退(博主目录->DataPC根)"""
+        try:
+            name = (name or "").strip()
+            uid = (uid or "").strip()
+            year = year_var.get().strip()
+            month = month_var.get().strip()
+            data_root = os.path.join(app_dir(), "DataPC")
+            os.makedirs(data_root, exist_ok=True)
+            if not (name and uid):
+                os.startfile(data_root)
+                self._append_log(f"未填写博主信息,已打开数据根目录: {data_root}")
+                return
+            user_dir = os.path.join(data_root, f"{name}_{uid}")
+            candidates = []
+            if year and month:
+                try:
+                    candidates.append(os.path.join(
+                        user_dir, f"{year}年", f"{int(month)}月"))
+                except (TypeError, ValueError):
+                    pass
+            candidates.append(user_dir)
+            for path in candidates:
+                if os.path.isdir(path):
+                    os.startfile(path)
+                    self._append_log(f"已打开文件夹: {path}")
+                    return
+            os.startfile(data_root)
+            self._append_log(
+                f"未找到博主 {name}({uid}) 在 {year}年{int(month) if month else '?'}月"
+                f" 的数据文件夹,已打开数据根目录: {data_root}")
+        except Exception as e:
+            logger.error(f"打开月份文件夹失败: {e}")
+            messagebox.showerror("打开失败", f"无法打开文件夹:\n{e}", parent=self.root)
+
+    def _export_log(self):
+        """导出本次运行日志到文本文件"""
+        try:
+            default_name = f"运行日志_{datetime.now():%Y%m%d_%H%M%S}.txt"
+            path = filedialog.asksaveasfilename(
+                title="导出运行日志", defaultextension=".txt",
+                initialdir=app_dir(),  # 默认打开程序所在目录
+                initialfile=default_name,
+                filetypes=[("文本文件", "*.txt"), ("所有文件", "*.*")],
+                parent=self.root)
+            if not path:
+                return
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(self.txt_log.get("1.0", "end"))
+            self._append_log(f"日志已导出: {path}")
+        except Exception as e:
+            logger.error(f"导出日志失败: {e}")
+            messagebox.showerror("导出失败", f"导出日志失败:\n{e}", parent=self.root)
+
     def _poll_queues(self):
         """主线程周期性检查队列:日志刷新 / 手动输入类名请求 / 等待确认请求"""
         try:
@@ -602,6 +1304,19 @@ class WeiboCrawlerGUI:
             while True:
                 msg = self.wait_req_queue.get_nowait()
                 self._show_wait_dialog(msg)
+        except queue.Empty:
+            pass
+
+        # AI分类进度(进度条/tokens)
+        try:
+            while True:
+                item = self.ai_progress_queue.get_nowait()
+                if item[0] == "progress":
+                    _, i, total, wid = item
+                    self.a_progress.configure(maximum=max(total, 1), value=i)
+                    self.a_lbl_progress.configure(text=f"{i}/{total} {wid}")
+                elif item[0] == "tokens":
+                    self.a_lbl_tokens.configure(text=f"已消耗 tokens: {item[1]}")
         except queue.Empty:
             pass
 
@@ -727,6 +1442,11 @@ class WeiboCrawlerGUI:
         except (ValueError, TypeError):
             messagebox.showwarning("日期错误", "请选择有效的开始/结束日期")
             return
+        if start > end:
+            messagebox.showwarning(
+                "日期错误",
+                f"开始日期({start})不能晚于结束日期({end}),请检查年月日是否填反")
+            return
 
         if not (name and uid):
             messagebox.showwarning("参数不完整", "请填写博主昵称和微博ID")
@@ -766,6 +1486,25 @@ class WeiboCrawlerGUI:
         self._append_log("=" * 60)
         self._append_log(f"开始任务: 博主={name}({uid}), 时间={start} ~ {end}")
 
+        # AI 实时判断: 校验API配置
+        ai_enabled = self.var_ai_enabled.get()
+        ai_config = None
+        if ai_enabled:
+            from weibo_ai import AIConfig
+            ai_config = AIConfig()
+            if not ai_config.is_configured():
+                messagebox.showwarning(
+                    "AI未配置",
+                    "已勾选“启用AI实时判断”,但尚未配置API Key。\n"
+                    "请先在“AI筛选”页签填写API Key并点击“保存配置”。")
+                self.running = False
+                self.btn_start.configure(state="normal")
+                self.btn_stop.configure(state="disabled")
+                self.lbl_status.configure(text="就绪", foreground="green")
+                return
+            self._append_log(f"已启用AI实时判断(高质量可信度阈值 "
+                             f"{ai_config.get('quality_threshold')}%)")
+
         kwargs = {
             "user_id": uid,
             "user_name": name,
@@ -785,6 +1524,8 @@ class WeiboCrawlerGUI:
             "export_format": self.var_export_format.get(),
             "skip_existing": self.var_skip_existing.get(),
             "min_words": int(self.var_min_words.get() or 0),
+            "ai_enabled": ai_enabled,
+            "ai_config": ai_config,
         }
 
         self.worker = threading.Thread(target=self._run_worker, args=(kwargs,), daemon=True)
@@ -802,8 +1543,14 @@ class WeiboCrawlerGUI:
                 final_msg = (
                     f"\n任务完成: 收集 {len(result['weibo_ids'])} 条微博, "
                     f"导出成功 {result['exported']} 条, 失败 {result['failed']} 条, "
-                    f"跳过 {result.get('skipped', 0)} 条\n"
-                    f"ID文件: {result.get('txt_file') or '无'}\n"
+                    f"跳过 {result.get('skipped', 0)} 条"
+                )
+                if result.get("ai_skipped"):
+                    final_msg += f", AI过滤 {result['ai_skipped']} 条"
+                if result.get("ai_tokens"):
+                    final_msg += f"\nAI消耗 tokens: {result['ai_tokens']}"
+                final_msg += (
+                    f"\nID文件: {result.get('txt_file') or '无'}\n"
                     f"MD目录: {result.get('md_dir') or '无'}"
                 )
             self.root.after(0, self._on_finish, final_msg)
@@ -827,6 +1574,11 @@ class WeiboCrawlerGUI:
         except (ValueError, TypeError):
             messagebox.showwarning("日期错误", "请选择有效的筛选开始/结束日期")
             return
+        if start > end:
+            messagebox.showwarning(
+                "日期错误",
+                f"开始日期({start})不能晚于结束日期({end}),请检查年月日是否填反")
+            return
         try:
             top_n = int(self.f_var_top.get())
             if top_n < 1:
@@ -838,9 +1590,10 @@ class WeiboCrawlerGUI:
         # 记住筛选页设置
         self._save_settings()
 
+        source = self.f_var_source.get()
         self._append_log("=" * 60)
         self._append_log(f"开始筛选: 博主={name}({uid}), 时间={start} ~ {end}, "
-                         f"前{top_n}篇")
+                         f"前{top_n}篇, 数据源={source}")
         self.btn_filter.configure(state="disabled")
 
         kwargs = {
@@ -855,7 +1608,9 @@ class WeiboCrawlerGUI:
             "by_word_count": self.f_var_sort_mode.get() == "word_count",
             "source_format": self.f_var_format.get(),
             "move": self.f_var_move.get(),
-            "filter_root": self.f_var_filter_root.get().strip() or os.path.join(app_dir(), "筛选"),
+            "filter_root": self._resolve_filter_root(),
+            "data_source": source,
+            "auto_open": self.f_var_auto_open.get(),
         }
         t = threading.Thread(target=self._run_filter_worker, args=(kwargs,), daemon=True)
         t.start()
@@ -874,11 +1629,20 @@ class WeiboCrawlerGUI:
                 source_format=kwargs["source_format"],
                 move=kwargs["move"],
                 by_word_count=kwargs.get("by_word_count", False),
+                data_source=kwargs.get("data_source", "DataPC"),
             )
             if result["output_dir"]:
                 msg = (f"\n筛选完成: 共 {len(result['items'])} 篇\n"
                        f"输出目录: {result['output_dir']}\n"
                        f"统计明细: 目录内'筛选说明.txt'")
+                # 勾选"筛选完成后自动打开输出文件夹"时直接打开
+                if kwargs.get("auto_open"):
+                    try:
+                        os.startfile(result["output_dir"])
+                        self.root.after(0, self._append_log,
+                                        f"已自动打开筛选结果文件夹: {result['output_dir']}")
+                    except Exception as e:
+                        logger.warning(f"自动打开筛选结果文件夹失败: {e}")
             else:
                 msg = "\n筛选未完成: 未找到符合条件的文件,请检查博主/日期/格式"
             self.root.after(0, self._on_filter_finish, msg)
