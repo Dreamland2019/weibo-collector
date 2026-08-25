@@ -249,9 +249,10 @@ class AIRunner:
     - 保留年月目录结构,且文件名保持 <博主>_<日期>_<微博ID>.ext,
       因此"筛选"页可把 AI 分类结果作为数据源再次筛选
     - 图片/视频随文章同步移动(images/ videos/ 子目录)
-    - 支持断点续跑: 已处理ID记录在 <filter_root>/ai_progress_<博主ID>.json
+    - 支持断点续跑: 已处理ID记录在 博主数据目录/ai_progress.json
+      (不随输出文件夹变化,换目录重跑也不会重复分类)
     - 可选 AI 总结: 生成标题写入 AI总结.txt;不保留原标题时
-      文件名追加 AI 标题(<原名>_<AI标题>.ext)
+      文件名改为 <日期>_<AI标题>.ext
     """
 
     CAT_DIR_NAMES = {
@@ -261,7 +262,7 @@ class AIRunner:
         CAT_LOW: "AI_{name}_其他低质量",
     }
 
-    def __init__(self, classifier, data_root=None, filter_root="筛选"):
+    def __init__(self, classifier, data_root=None, filter_root="AI分类"):
         self.classifier = classifier
         self.config = classifier.config
         self.data_root = data_root or os.path.join(app_dir(), "DataPC")
@@ -360,6 +361,11 @@ class AIRunner:
         return ""
 
     def _progress_path(self, user_id):
+        """进度文件路径: 优先放博主数据目录(不随输出文件夹变化,防重复更稳)"""
+        ud = self._find_user_dir(user_id)
+        if ud:
+            return os.path.join(ud, "ai_progress.json")
+        # 找不到博主目录时退回输出目录(旧路径)
         return os.path.join(self.filter_root, f"ai_progress_{user_id}.json")
 
     def _apply_thresholds(self, ad_prob, quality_prob):
@@ -386,6 +392,12 @@ class AIRunner:
             path = self._progress_path(user_id)
             if os.path.exists(path):
                 with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                return set(data.get("processed", []))
+            # 兼容旧位置(输出目录下的 ai_progress_<uid>.json)
+            legacy = os.path.join(self.filter_root, f"ai_progress_{user_id}.json")
+            if legacy != path and os.path.exists(legacy):
+                with open(legacy, "r", encoding="utf-8") as f:
                     data = json.load(f)
                 return set(data.get("processed", []))
         except Exception:
@@ -436,6 +448,7 @@ class AIRunner:
         total = len(file_records)
         counts = {CAT_HIGH: 0, CAT_AD: 0, CAT_SUSPICIOUS: 0, CAT_LOW: 0}
         failed = 0
+        skipped_processed = 0
         total_tokens = 0
         summaries = []  # (原文件名, AI标题, 类别)
 
@@ -448,6 +461,7 @@ class AIRunner:
 
         for i, (fpath, wid, fdate) in enumerate(file_records, 1):
             if resume and wid in processed:
+                skipped_processed += 1
                 logger.info(f"[{i}/{total}] 已处理过,跳过: {wid}")
                 continue
             if progress_callback:
@@ -543,12 +557,14 @@ class AIRunner:
             "suspicious": counts[CAT_SUSPICIOUS],
             "low": counts[CAT_LOW],
             "failed": failed,
+            "skipped": skipped_processed,
             "tokens": total_tokens,
             "output_dir": self.filter_root,
             "summaries": summaries,
         }
         logger.info(
-            f"AI分类完成: 共{total}篇 高质量{counts[CAT_HIGH]} 广告{counts[CAT_AD]} "
+            f"AI分类完成: 共{total}篇(已跳过{skipped_processed}篇) "
+            f"高质量{counts[CAT_HIGH]} 广告{counts[CAT_AD]} "
             f"可疑{counts[CAT_SUSPICIOUS]} 低质量{counts[CAT_LOW]} 失败{failed} "
             f"消耗{total_tokens}tokens")
         return result

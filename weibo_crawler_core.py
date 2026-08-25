@@ -1225,8 +1225,8 @@ class WeiboPCCrawler:
 
     @staticmethod
     def generate_markdown(detail):
-        """根据详情生成 Markdown 内容"""
-        md = f">URL：{detail['url']}\n"
+        """根据详情生成 Markdown 内容(URL 带超链接,便于阅读器直接点击)"""
+        md = f">URL：[微博原文链接]({detail['url']})\n"
         md += f">发布时间：{detail['publish_time']}\n"
         md += f">词条：{detail['topics']}\n"
         md += f">正文字数：{len(detail['content'])}字符\n\n"
@@ -1247,7 +1247,7 @@ class WeiboPCCrawler:
                          download_images=False, download_videos=False,
                          export_format="md", skip_existing=False, min_words=0,
                          ai_enabled=False, ai_classifier=None, ai_config=None,
-                         ai_usage_callback=None):
+                         ai_usage_callback=None, ai_rename=False, ai_root=None):
         """逐条抓取详情并导出(支持 md / docx 格式)
 
         参数:
@@ -1262,6 +1262,8 @@ class WeiboPCCrawler:
           ai_classifier                AIClassifier 实例(ai_enabled 时必传)
           ai_config                    AIConfig 实例(取高质量阈值等)
           ai_usage_callback            每次AI调用后回调(token增量), 用于显示用量
+          ai_rename                    AI通过的文章同时生成标题并复制到 AI分类 目录
+          ai_root                      AI分类输出根目录(默认 程序目录/AI分类)
 
         返回 (成功数, 失败数, 跳过数, AI过滤数)
         """
@@ -1336,6 +1338,7 @@ class WeiboPCCrawler:
 
             # AI 实时判断: 高质量可信度低于阈值则不导出(也不下载媒体)
             ai_quality = None
+            ai_title = None
             if ai_enabled and ai_classifier is not None:
                 try:
                     _, _, quality_prob, usage = ai_classifier.classify(
@@ -1351,6 +1354,17 @@ class WeiboPCCrawler:
                             f"{ai_quality_threshold}%),跳过且不下载媒体: {weibo_id}")
                         continue
                     logger.info(f"AI判定高质量(高质量可信度{ai_quality}%): {weibo_id}")
+                    # 可选: AI 总结生成标题(用于复制到 AI分类 目录时重命名)
+                    if ai_rename:
+                        try:
+                            ai_title, usage2 = ai_classifier.summarize_title(
+                                detail.get("content", ""))
+                            tokens2 = int(usage2.get("total_tokens", 0) or 0)
+                            if ai_usage_callback:
+                                ai_usage_callback(tokens2)
+                        except Exception as e:
+                            logger.warning(f"AI总结失败(不影响导出): {weibo_id}: {e}")
+                            ai_title = None
                 except Exception as e:
                     # AI 失败时按通过处理,避免卡住整个爬取
                     logger.warning(f"AI实时判断失败({e}),按通过处理: {weibo_id}")
@@ -1423,6 +1437,11 @@ class WeiboPCCrawler:
 
             ok_count += 1
             logger.info(f"已保存: {os.path.basename(output_path)}")
+
+            # AI 总结重命名: 复制一份到 AI分类/AI_<博主>_高质量/<年月>/ (保留原文件)
+            if ai_title and ai_root:
+                self._copy_to_ai_dir(output_path, user_name, save_time,
+                                     ai_title, ai_root)
 
             if i < total - 1:
                 sleep_time = random.randint(min_interval, max_interval)
@@ -1540,7 +1559,12 @@ class WeiboPCCrawler:
             run.font.bold = bold
             return p
 
-        add_para(f"URL：{detail['url']}")
+        # URL 行: 带可点击超链接(蓝色下划线),查看原文章/评论区可直接点击
+        p_url = doc.add_paragraph()
+        run = p_url.add_run("URL：")
+        run.font.name = '宋体'
+        run._element.rPr.rFonts.set(qn('w:eastAsia'), '宋体')
+        self._add_hyperlink(p_url, detail['url'], detail['url'])
         add_para(f"发布时间：{detail['publish_time']}")
         add_para(f"词条：{detail['topics']}")
         add_para(f"正文字数：{len(detail['content'])}字符")
@@ -1595,6 +1619,71 @@ class WeiboPCCrawler:
         if detail.get("ai_quality") is not None:
             add_para(f"高质量可信度：{detail['ai_quality']}%")
         doc.save(output_path)
+
+    @staticmethod
+    def _copy_to_ai_dir(output_path, user_name, save_time, ai_title, ai_root):
+        """把刚导出的文章复制到 AI分类/AI_<博主>_高质量/ 并重命名为 <日期>_<AI标题>
+
+        保留 DataPC 原文件(微博ID/媒体去重均依赖原文件)
+        """
+        try:
+            dst_root = os.path.join(ai_root, f"AI_{user_name}_高质量")
+            month_dir = WeiboPCCrawler._publish_month_dir(save_time, dst_root)
+            os.makedirs(month_dir, exist_ok=True)
+            date_part = ((save_time or "").split()[0]
+                         if save_time and save_time != "未知时间" else "unknown")
+            safe_title = re.sub(r'[\\/:*?"<>|\r\n]+', "", ai_title or "").strip() or "无标题"
+            safe_title = safe_title[:40]
+            ext = os.path.splitext(output_path)[1] or ".md"
+            dst = os.path.join(month_dir, f"{date_part}_{safe_title}{ext}")
+            if os.path.exists(dst):
+                stem, e = os.path.splitext(dst)
+                n = 2
+                while os.path.exists(f"{stem}_{n}{e}"):
+                    n += 1
+                dst = f"{stem}_{n}{e}"
+            shutil.copy2(output_path, dst)
+            logger.info(f"已复制到AI分类目录: {dst}")
+            return dst
+        except Exception as e:
+            logger.warning(f"复制到AI分类目录失败: {e}")
+            return None
+
+    @staticmethod
+    def _add_hyperlink(paragraph, url, text):
+        """在 docx 段落中添加可点击超链接(python-docx 原生不支持,手动写 XML)"""
+        try:
+            from docx.opc.constants import RELATIONSHIP_TYPE as RT
+            from docx.oxml import OxmlElement
+            from docx.oxml.ns import qn
+            part = paragraph.part
+            r_id = part.relate_to(url, RT.HYPERLINK, is_external=True)
+            hyperlink = OxmlElement('w:hyperlink')
+            hyperlink.set(qn('r:id'), r_id)
+            new_run = OxmlElement('w:r')
+            rPr = OxmlElement('w:rPr')
+            fonts = OxmlElement('w:rFonts')
+            fonts.set(qn('w:eastAsia'), '宋体')
+            rPr.append(fonts)
+            rStyle = OxmlElement('w:rStyle')
+            rStyle.set(qn('w:val'), 'Hyperlink')
+            rPr.append(rStyle)
+            color = OxmlElement('w:color')
+            color.set(qn('w:val'), '0563C1')
+            rPr.append(color)
+            u = OxmlElement('w:u')
+            u.set(qn('w:val'), 'single')
+            rPr.append(u)
+            new_run.append(rPr)
+            t = OxmlElement('w:t')
+            t.text = text
+            new_run.append(t)
+            hyperlink.append(new_run)
+            paragraph._p.append(hyperlink)
+            return True
+        except Exception as e:
+            logger.warning(f"添加超链接失败: {e}")
+            return False
 
     @staticmethod
     def _download_media(urls, base_dir, sub_dir, weibo_id):
@@ -1714,7 +1803,8 @@ def run_task(user_id, user_name, start_date, end_date,
              min_interval=3, max_interval=8,
              download_images=False, download_videos=False,
              export_format="md", skip_existing=False, min_words=0,
-             ai_enabled=False, ai_config=None, ai_usage_callback=None):
+             ai_enabled=False, ai_config=None, ai_usage_callback=None,
+             ai_rename=False, ai_root=None):
     """一键爬取任务:收集指定时间范围的微博ID并导出
 
     参数:
@@ -1737,6 +1827,8 @@ def run_task(user_id, user_name, start_date, end_date,
       ai_enabled             启用AI实时判断(需 ai_config 已配置API)
       ai_config              AIConfig 实例;为 None 时尝试读取 ai_config.json
       ai_usage_callback      token 用量回调(每次AI调用后调用)
+      ai_rename              AI通过的文章同时生成标题并复制到 AI分类 目录
+      ai_root                AI分类输出根目录(默认 程序目录/AI分类)
 
     返回 dict:
       {"username", "weibo_ids", "txt_file", "md_dir", "exported", "failed",
@@ -1838,7 +1930,9 @@ def run_task(user_id, user_name, start_date, end_date,
             export_format=export_format, skip_existing=skip_existing,
             min_words=min_words,
             ai_enabled=ai_enabled, ai_classifier=ai_classifier,
-            ai_config=ai_config, ai_usage_callback=ai_usage_callback)
+            ai_config=ai_config, ai_usage_callback=ai_usage_callback,
+            ai_rename=ai_rename,
+            ai_root=ai_root or os.path.join(app_dir(), "AI分类"))
         result["exported"] = ok_count
         result["failed"] = fail_count
         result["skipped"] = skipped_count
@@ -1902,9 +1996,11 @@ class ArticleFilter:
         "ai_suspicious": "可疑",
     }
 
-    def __init__(self, data_root=None, filter_root="筛选"):
+    def __init__(self, data_root=None, filter_root="筛选", ai_root=None):
         self.data_root = data_root or os.path.join(app_dir(), "DataPC")
         self.filter_root = filter_root
+        # AI 分类输出目录(与热度/字数筛选分开放;搜索时兼容旧位置"筛选"目录)
+        self.ai_root = ai_root or os.path.join(app_dir(), "AI分类")
 
     # ---------- 扫描与解析 ----------
 
@@ -1947,21 +2043,22 @@ class ArticleFilter:
         return max(candidates, key=weight)
 
     def _find_ai_dir(self, user_name, source_key):
-        """在筛选文件夹下查找 AI 分类目录(如 筛选/AI_卢诗翰_高质量)
+        """在 AI 分类目录(新: 程序目录/AI分类)或筛选目录(旧: 筛选/AI_*)下查找分类目录
 
-        目录由 AI 筛选功能生成,结构: AI_<博主名>_<类别>/<年份>年/<月份>/
+        目录: AI_<博主名>_<类别>/<年份>年/<月份>/
         返回目录路径;未找到返回 None
         """
         label = self.AI_SOURCE_LABELS.get(source_key)
         if not label:
             return None
         target = f"AI_{user_name}_{label}"
-        try:
-            for name in os.listdir(self.filter_root):
-                if name == target and os.path.isdir(os.path.join(self.filter_root, name)):
-                    return os.path.join(self.filter_root, name)
-        except Exception as e:
-            logger.warning(f"查找AI分类目录失败: {e}")
+        for root in (self.filter_root, self.ai_root):
+            try:
+                for name in os.listdir(root):
+                    if name == target and os.path.isdir(os.path.join(root, name)):
+                        return os.path.join(root, name)
+            except Exception:
+                continue
         return None
 
     def scan_files(self, user_id, start_date, end_date, source_format="md",
