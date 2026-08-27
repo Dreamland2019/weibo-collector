@@ -96,7 +96,17 @@ def save_blogger_record(user_id, user_name, data_root=None):
         return False
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
+        # 修复: 若文件已存在但末尾没有换行(如手动编辑过最后一行),
+        # 追加时会把新记录拼到上一行,导致记录解析错误。
+        need_newline = False
+        if os.path.exists(path):
+            with open(path, "rb") as f:
+                data = f.read()
+            if data and not data.endswith((b"\n", b"\r")):
+                need_newline = True
         with open(path, "a", encoding="utf-8") as f:
+            if need_newline:
+                f.write("\n")
             f.write(f"{user_id} {user_name}\n")
         logger.info(f"已记录博主: {user_name}({user_id}) -> {path}")
         return True
@@ -627,11 +637,13 @@ class WeiboPCCrawler:
 
         若当前为无头模式(headless),自动重启为有头模式,
         否则用户看不到浏览器窗口无法扫码登录。
+        登录成功后若原本是无头模式,自动恢复为无头模式继续(不打扰用户)。
         """
         logger.info("请手动登录微博...")
 
         # 无头模式下无法显示登录界面,自动切换为有头模式
-        if self.headless:
+        was_headless = bool(self.headless)
+        if was_headless:
             logger.warning("当前为无头模式,无法显示浏览器供登录,自动重启为有头模式...")
             try:
                 self.driver.quit()
@@ -649,9 +661,74 @@ class WeiboPCCrawler:
             input("请在浏览器中完成登录,然后按回车键继续...")
         if self.check_login_status():
             logger.info("登录成功")
+            # 原本是无头模式: 登录完成后恢复无头模式,继续自动爬取
+            if was_headless:
+                logger.info("登录完成,恢复无头模式继续...")
+                try:
+                    self.driver.quit()
+                except Exception:
+                    pass
+                self.driver = self.setup_driver(headless=True)
+                self.wait = WebDriverWait(self.driver, 10)
+                self.headless = True
             return True
         logger.warning("登录可能未成功,请检查")
         return False
+
+    # ---------- 博主校验 ----------
+
+    # 微博用户不存在时的页面提示(文本片段,取页面正文匹配)
+    USER_NOT_FOUND_MARKERS = ("用户不存在", "用户不能存在", "该用户不存在",
+                              "此用户不存在", "无此用户", "账号不存在")
+
+    def verify_user(self, user_id, user_name=""):
+        """爬取前访问用户主页,校验:
+        1) 用户(微博ID)是否存在 - 不存在时抛 RuntimeError(友好提示)
+        2) 主页昵称是否与输入昵称匹配 - 不匹配时抛 RuntimeError(防止爬错人)
+
+        返回主页解析到的昵称(可能为空字符串,表示无法解析,不做强校验)。
+        """
+        url = f"https://weibo.com/u/{user_id}"
+        logger.info(f"正在校验博主是否存在: {url}")
+        self.driver.get(url)
+        time.sleep(4)
+        body_text = ""
+        try:
+            body_text = (self.driver.find_element(By.TAG_NAME, "body").text or "")
+        except Exception as e:
+            logger.warning(f"读取主页正文失败: {e}")
+        for marker in self.USER_NOT_FOUND_MARKERS:
+            if marker in body_text:
+                raise RuntimeError(
+                    f"博主不存在: 微博ID {user_id} 对应的用户不存在(页面提示“{marker}”),"
+                    f"请检查ID是否正确。可访问 {url} 确认。")
+        # 昵称匹配: 主页标题形如 “@<昵称> 的个人主页”(实测格式,部分场景为“的微博主页”);
+        # 标题为异步加载(初始为 Sina Visitor System / -微博),轮询等待其变为有效值(最多 ~8 秒)
+        title = ""
+        for _ in range(8):
+            try:
+                title = (self.driver.title or "").strip()
+            except Exception:
+                title = ""
+            if re.search(r"(?:的个人主页|的微博主页|的微博)$", title):
+                break
+            time.sleep(1)
+        page_name = ""
+        try:
+            m = re.search(r"^@?\s*(.+?)\s*(?:的个人主页|的微博主页|的微博)$", title)
+            if m:
+                page_name = m.group(1).strip()
+        except Exception:
+            pass
+        # “我的”是访问自己主页时的标题,无法据此核对昵称,跳过
+        if page_name and page_name == "我的":
+            page_name = ""
+        if page_name and user_name and user_name != user_id and page_name != user_name:
+            raise RuntimeError(
+                f"博主昵称与微博ID不匹配: 输入的昵称是“{user_name}”,"
+                f"但该ID主页显示的昵称是“{page_name}”,请确认后重试。\n"
+                f"可访问 {url} 查看实际情况。")
+        return page_name
 
     # ---------- URL 构建 ----------
 
@@ -827,6 +904,14 @@ class WeiboPCCrawler:
             if not self.manual_login():
                 logger.error("登录失败,无法继续")
                 return None, []
+
+        # 爬取前校验博主: ID 是否存在、昵称是否与 ID 匹配(避免爬错人/误提示"该时间段无微博")
+        try:
+            self.verify_user(user_id, user_name or "")
+        except RuntimeError:
+            raise  # 留给 run_task 统一处理
+        except Exception as e:
+            logger.warning(f"博主校验未完成(继续爬取): {e}")
 
         search_url = self.build_search_url(
             user_id, is_ori, is_forward, is_text, is_pic,
@@ -1247,7 +1332,8 @@ class WeiboPCCrawler:
                          download_images=False, download_videos=False,
                          export_format="md", skip_existing=False, min_words=0,
                          ai_enabled=False, ai_classifier=None, ai_config=None,
-                         ai_usage_callback=None, ai_rename=False, ai_root=None):
+                         ai_usage_callback=None, ai_rename=False, ai_root=None,
+                         ai_copy_media=True):
         """逐条抓取详情并导出(支持 md / docx 格式)
 
         参数:
@@ -1264,6 +1350,8 @@ class WeiboPCCrawler:
           ai_usage_callback            每次AI调用后回调(token增量), 用于显示用量
           ai_rename                    AI通过的文章同时生成标题并复制到 AI分类 目录
           ai_root                      AI分类输出根目录(默认 程序目录/AI分类)
+          ai_copy_media                AI分类副本是否连带复制图片/视频
+                                       (False 时md副本改为引用原网络链接)
 
         返回 (成功数, 失败数, 跳过数, AI过滤数)
         """
@@ -1441,7 +1529,8 @@ class WeiboPCCrawler:
             # AI 总结重命名: 复制一份到 AI分类/AI_<博主>_高质量/<年月>/ (保留原文件)
             if ai_title and ai_root:
                 self._copy_to_ai_dir(output_path, user_name, save_time,
-                                     ai_title, ai_root)
+                                     ai_title, ai_root,
+                                     copy_media=ai_copy_media, detail=detail)
 
             if i < total - 1:
                 sleep_time = random.randint(min_interval, max_interval)
@@ -1564,7 +1653,8 @@ class WeiboPCCrawler:
         run = p_url.add_run("URL：")
         run.font.name = '宋体'
         run._element.rPr.rFonts.set(qn('w:eastAsia'), '宋体')
-        self._add_hyperlink(p_url, detail['url'], detail['url'])
+        # 注意: 本方法是 @staticmethod,不能使用 self,用类名调用
+        WeiboPCCrawler._add_hyperlink(p_url, detail['url'], detail['url'])
         add_para(f"发布时间：{detail['publish_time']}")
         add_para(f"词条：{detail['topics']}")
         add_para(f"正文字数：{len(detail['content'])}字符")
@@ -1621,10 +1711,15 @@ class WeiboPCCrawler:
         doc.save(output_path)
 
     @staticmethod
-    def _copy_to_ai_dir(output_path, user_name, save_time, ai_title, ai_root):
+    def _copy_to_ai_dir(output_path, user_name, save_time, ai_title, ai_root,
+                        copy_media=True, detail=None):
         """把刚导出的文章复制到 AI分类/AI_<博主>_高质量/ 并重命名为 <日期>_<AI标题>
 
-        保留 DataPC 原文件(微博ID/媒体去重均依赖原文件)
+        保留 DataPC 原文件(微博ID/媒体去重均依赖原文件)。
+        copy_media=True(默认): 同时把该微博的 images/videos 一并复制到AI分类目录
+        (修复: 此前只复制文章文件,导致AI副本里的图片引用是坏的)。
+        copy_media=False: 不复制媒体,并把 md 副本中的本地媒体引用改写为
+        原微博网络链接(不占空间,联网可看图);docx 图片已内嵌,直接复制即可。
         """
         try:
             dst_root = os.path.join(ai_root, f"AI_{user_name}_高质量")
@@ -1642,12 +1737,90 @@ class WeiboPCCrawler:
                 while os.path.exists(f"{stem}_{n}{e}"):
                     n += 1
                 dst = f"{stem}_{n}{e}"
-            shutil.copy2(output_path, dst)
+
+            if copy_media:
+                shutil.copy2(output_path, dst)
+                # 连带复制该微博的图片/视频(与事后AI分类行为一致)
+                WeiboPCCrawler._copy_ai_media(output_path, month_dir)
+            elif ext.lower() == ".md":
+                # 不复制媒体: 把 md 中的本地媒体引用改写为原网络链接,避免破图
+                try:
+                    with open(output_path, "r", encoding="utf-8") as f:
+                        md_text = f.read()
+                    md_text = WeiboPCCrawler._rewrite_media_refs(md_text, detail)
+                    with open(dst, "w", encoding="utf-8") as f:
+                        f.write(md_text)
+                except Exception as e:
+                    logger.warning(f"改写AI副本媒体引用失败,直接复制原文件: {e}")
+                    shutil.copy2(output_path, dst)
+            else:
+                # docx: 图片已内嵌在文档中,直接复制即可
+                shutil.copy2(output_path, dst)
+
             logger.info(f"已复制到AI分类目录: {dst}")
             return dst
         except Exception as e:
             logger.warning(f"复制到AI分类目录失败: {e}")
             return None
+
+    @staticmethod
+    def _copy_ai_media(src_file, dst_dir):
+        """把与文章同目录 images/ videos/ 下属于该微博的媒体复制到 AI 分类目录"""
+        try:
+            m = re.search(r"_([A-Za-z0-9]+)\.(?:md|docx)$", os.path.basename(src_file))
+            if not m:
+                return
+            weibo_id = m.group(1)
+            src_dir = os.path.dirname(src_file)
+            for sub in ("images", "videos"):
+                src_sub = os.path.join(src_dir, sub)
+                if not os.path.isdir(src_sub):
+                    continue
+                dst_sub = os.path.join(dst_dir, sub)
+                os.makedirs(dst_sub, exist_ok=True)
+                prefix = f"{weibo_id}_"
+                for fname in os.listdir(src_sub):
+                    if fname.startswith(prefix):
+                        s = os.path.join(src_sub, fname)
+                        d = os.path.join(dst_sub, fname)
+                        if os.path.abspath(s) != os.path.abspath(d):
+                            shutil.copy2(s, d)
+        except Exception as e:
+            logger.warning(f"复制媒体到AI分类目录失败 {src_file}: {e}")
+
+    @staticmethod
+    def _rewrite_media_refs(md_text, detail):
+        """把 md 中的本地媒体引用改写为原微博网络链接
+
+        匹配行: ![图片N](本地路径) / [视频](本地路径)
+        网络链接行(![图片N](https://...) / [视频链接](https://...))不受影响。
+        """
+        if not md_text or not detail:
+            return md_text
+        images = detail.get("images") or []
+        videos = detail.get("videos") or []
+
+        def _img_repl(m):
+            idx = int(m.group(1))
+            if 1 <= idx <= len(images) and images[idx - 1]:
+                return f"![图片{idx}]({images[idx - 1]})"
+            return m.group(0)
+
+        viter = iter(videos)
+
+        def _vid_repl(m):
+            try:
+                url = next(viter)
+            except StopIteration:
+                return m.group(0)
+            return f"[视频]({url})" if url else m.group(0)
+
+        try:
+            md_text = re.sub(r"!\[图片(\d+)\]\([^)]+\)", _img_repl, md_text)
+            md_text = re.sub(r"\[视频\]\([^)]+\)", _vid_repl, md_text)
+        except Exception as e:
+            logger.warning(f"改写媒体引用失败: {e}")
+        return md_text
 
     @staticmethod
     def _add_hyperlink(paragraph, url, text):
@@ -1804,7 +1977,7 @@ def run_task(user_id, user_name, start_date, end_date,
              download_images=False, download_videos=False,
              export_format="md", skip_existing=False, min_words=0,
              ai_enabled=False, ai_config=None, ai_usage_callback=None,
-             ai_rename=False, ai_root=None):
+             ai_rename=False, ai_root=None, ai_copy_media=True):
     """一键爬取任务:收集指定时间范围的微博ID并导出
 
     参数:
@@ -1829,6 +2002,8 @@ def run_task(user_id, user_name, start_date, end_date,
       ai_usage_callback      token 用量回调(每次AI调用后调用)
       ai_rename              AI通过的文章同时生成标题并复制到 AI分类 目录
       ai_root                AI分类输出根目录(默认 程序目录/AI分类)
+      ai_copy_media          AI分类副本是否连带复制图片/视频
+                             (False 时md副本改为引用原网络链接)
 
     返回 dict:
       {"username", "weibo_ids", "txt_file", "md_dir", "exported", "failed",
@@ -1932,7 +2107,8 @@ def run_task(user_id, user_name, start_date, end_date,
             ai_enabled=ai_enabled, ai_classifier=ai_classifier,
             ai_config=ai_config, ai_usage_callback=ai_usage_callback,
             ai_rename=ai_rename,
-            ai_root=ai_root or os.path.join(app_dir(), "AI分类"))
+            ai_root=ai_root or os.path.join(app_dir(), "AI分类"),
+            ai_copy_media=ai_copy_media)
         result["exported"] = ok_count
         result["failed"] = fail_count
         result["skipped"] = skipped_count
@@ -2202,6 +2378,10 @@ class ArticleFilter:
             return {"output_dir": None, "items": [], "skipped": []}
 
         # 2. 解析统计并计算得分
+        # 修复: 未勾选任何指标时默认按转评赞之和排序(此前会退化为按日期排序)
+        if not by_word_count and not (use_repost or use_comment or use_like):
+            use_repost = use_comment = use_like = True
+            logger.info("未勾选任何指标,默认按 转发+评论+点赞 之和排序")
         records = []
         for fpath, fdate in files:
             repost, comment, like, word_count = self.read_stats(fpath)
@@ -2227,13 +2407,44 @@ class ArticleFilter:
         top = records[:top_n]
 
         # 4. 创建输出文件夹: 筛选/<博主名>_<ID>/<起>~<止>_热度TOP<N> 或 _字数TOP<N>
+        #    文件夹名包含 数据源 与 勾选指标,避免不同数据源/不同指标组合的
+        #    筛选结果混到同一个文件夹(如 DataPC 与 AI分类的"热度TOP10"分开)。
+        #    格式: <起>~<止>_热度TOP<N>[_数据源][_指标]
+        #    日期年份省略"20"(如 26-08-01),让文件夹名短一点;
+        #    数据源为默认 DataPC 时省略,AI 数据源追加 _AI_类别;
+        #    热度排序且未勾全三项时追加指标(如 _转发,_转发评论)。
         #    (先按博主分一层,避免多位博主的结果混在一起)
         os.makedirs(self.filter_root, exist_ok=True)
         metric_tag = "字数" if by_word_count else "热度"
+
+        def _short_date(s):
+            s = (s or "").strip()
+            return s[2:] if len(s) >= 4 and s.startswith("20") else s
+
+        date_tag = f"{_short_date(start_date)}~{_short_date(end_date)}"
+        src_tag = {
+            "DataPC": "",
+            "ai_high": "AI_高质量",
+            "ai_ad": "AI_广告",
+            "ai_suspicious": "AI_可疑",
+        }.get(data_source or "DataPC", "")
+        if by_word_count:
+            ind_tag = ""
+        else:
+            labels = []
+            if use_repost:
+                labels.append("转发")
+            if use_comment:
+                labels.append("评论")
+            if use_like:
+                labels.append("点赞")
+            ind_tag = "" if len(labels) >= 3 else ("".join(labels) or "全部")
+        name_parts = [f"{date_tag}_{metric_tag}TOP{len(top)}", src_tag, ind_tag]
+        folder_name = "_".join(p for p in name_parts if p)
         out_dir = os.path.join(
             self.filter_root,
             f"{user_name}_{user_id}",
-            f"{start_date}~{end_date}_{metric_tag}TOP{len(top)}")
+            folder_name)
         os.makedirs(out_dir, exist_ok=True)
 
         # 5. 复制/移动并重命名(序号前缀体现排名),同步复制图片/视频

@@ -123,7 +123,7 @@ class LogQueueHandler(logging.Handler):
 class WeiboCrawlerGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("微博长文收集记录整理器 v0.5.0")
+        self.root.title("微博长文收集记录整理器 v0.5.1")
         self.root.geometry("900x760")
         self.root.minsize(840, 680)
 
@@ -155,8 +155,15 @@ class WeiboCrawlerGUI:
         self.root.bind("<Configure>", self._update_hint_wrap)
         # 首次打开/切换页签后,布局完成时补触发几次(仅靠 Configure 事件,
         # 窗口不拖动时可能永远不触发,导致提示一直挤在行尾)
-        self.root.bind("<<NotebookTabChanged>>",
-                       lambda e: self.root.after(80, self._update_hint_wrap))
+        def _on_tab_changed(_e):
+            def _after_switch():
+                self._update_hint_wrap()
+                # 修复: 切换到"数据筛选"页时刷新数据源下拉,
+                # 避免新产生的 AI 分类目录要重启程序才能选择
+                if hasattr(self, "f_source_combo"):
+                    self._refresh_source_options()
+            self.root.after(80, _after_switch)
+        self.root.bind("<<NotebookTabChanged>>", _on_tab_changed)
         self.root.after(120, self._update_hint_wrap)
         self.root.after(600, self._update_hint_wrap)
 
@@ -208,6 +215,7 @@ class WeiboCrawlerGUI:
             "min_words": self.var_min_words.get(),
             "ai_enabled": self.var_ai_enabled.get(),
             "ai_rename": self.var_ai_rename.get(),
+            "ai_copy_media": self.var_ai_copy_media.get(),
         }
         # 筛选页设置
         if hasattr(self, "f_var_name"):
@@ -281,6 +289,7 @@ class WeiboCrawlerGUI:
         self.var_min_words.set(st.get("min_words", self.var_min_words.get()))
         self.var_ai_enabled.set(bool(st.get("ai_enabled", False)))
         self.var_ai_rename.set(bool(st.get("ai_rename", False)))
+        self.var_ai_copy_media.set(bool(st.get("ai_copy_media", True)))
         # 筛选页设置恢复
         if hasattr(self, "f_var_name"):
             self.f_var_name.set(st.get("f_name", self.f_var_name.get()))
@@ -524,12 +533,20 @@ class WeiboCrawlerGUI:
         self.var_ai_rename = tk.BooleanVar(value=False)
         ttk.Checkbutton(row2d, text="AI总结并重命名标题",
                         variable=self.var_ai_rename).pack(side="left", padx=(6, 0))
+        # 修复: 实时AI复制时,默认连图片/视频一起复制到AI分类目录
+        # (此前只复制文章文件,导致AI副本里的图片引用是坏的)
+        self.var_ai_copy_media = tk.BooleanVar(value=True)
+        ttk.Checkbutton(row2d, text="分类时复制媒体(图片/视频)",
+                        variable=self.var_ai_copy_media).pack(side="left", padx=(6, 0))
         self.btn_ai_test = ttk.Button(row2d, text="测试连接",
                                       command=lambda: self._test_ai_connection(self.btn_ai_test))
         self.btn_ai_test.pack(side="left", padx=8)
         self._hint_icon(row2d, "启用AI后:逐篇调用AI判断“高质量可信度”,低于阈值不导出也不下载媒体;"
                         "勾选“AI总结并重命名标题”后,通过的文章会复制重命名到“AI分类”目录"
-                        "(如 26-1-22_标题.md,原文件保留);API配置在“AI分类”页签",
+                        "(如 26-1-22_标题.md,原文件保留);“分类时复制媒体”默认勾选:"
+                        "把文章配图/视频一并复制到AI分类目录;取消勾选则AI副本中的媒体"
+                        "引用原微博网络链接,不占用本地空间(需联网查看);"
+                        "API配置在“AI分类”页签",
                         pack=dict(side="left", padx=4))
 
         # 高级设置
@@ -727,7 +744,7 @@ class WeiboCrawlerGUI:
         frow4b = ttk.Frame(frame_f1)
         frow4b.pack(fill="x", pady=(4, 0))
         ttk.Label(frow4b, text="数据源:").pack(side="left")
-        self.f_var_source = tk.StringVar(value="DataPC")
+        self.f_var_source = tk.StringVar(value="爬取数据(DataPC)")
         self.f_source_combo = ttk.Combobox(frow4b, textvariable=self.f_var_source,
                                            width=18, state="readonly")
         self.f_source_combo.pack(side="left", padx=4)
@@ -736,11 +753,8 @@ class WeiboCrawlerGUI:
                         pack=dict(side="left", padx=4))
 
         def on_source_select(event):
-            disp = self.f_var_source.get()
-            for key, d in self._f_source_display_map.items():
-                if d == disp:
-                    self.f_var_source.set(key)
-                    return
+            # 显示文本即变量值;实际数据源键在 _start_filter 中按显示文本反查
+            pass
 
         self.f_source_combo.bind("<<ComboboxSelected>>", on_source_select)
         self.f_var_filter_root.trace_add(
@@ -1008,20 +1022,29 @@ class WeiboCrawlerGUI:
             self.a_entry_key.configure(show="*")
             self.a_btn_show_key.configure(text="显示")
 
+    def _ai_config_from_form(self):
+        """从AI页签当前表单构建 AIConfig(含 API/阈值/提示词)
+
+        与"保存配置"按钮保持同一套字段;供 _a_save_config / 爬取页 / AI分类
+        共用,避免三处逻辑不一致。
+        """
+        from weibo_ai import AIConfig
+        cfg = AIConfig()
+        cfg.data.update({
+            "api_key": self.a_var_api_key.get().strip(),
+            "base_url": self.a_var_base_url.get().strip() or "https://api.deepseek.com",
+            "model": self.a_var_model.get().strip() or "deepseek-v4-flash",
+            "quality_threshold": self._a_int(self.a_var_quality.get(), 80),
+            "ad_threshold": self._a_int(self.a_var_ad.get(), 70),
+            "suspicious_low": self._a_int(self.a_var_susp.get(), 30),
+            "system_prompt": self.a_txt_prompt.get("1.0", "end").strip(),
+        })
+        return cfg
+
     def _a_save_config(self):
         """保存 AI 配置到 ai_config.json"""
         try:
-            from weibo_ai import AIConfig
-            cfg = AIConfig()
-            cfg.data.update({
-                "api_key": self.a_var_api_key.get().strip(),
-                "base_url": self.a_var_base_url.get().strip() or "https://api.deepseek.com",
-                "model": self.a_var_model.get().strip() or "deepseek-v4-flash",
-                "quality_threshold": self._a_int(self.a_var_quality.get(), 80),
-                "ad_threshold": self._a_int(self.a_var_ad.get(), 70),
-                "suspicious_low": self._a_int(self.a_var_susp.get(), 30),
-                "system_prompt": self.a_txt_prompt.get("1.0", "end").strip(),
-            })
+            cfg = self._ai_config_from_form()
             if cfg.save():
                 self._append_log(f"AI配置已保存到: {cfg.config_path}")
                 self._save_settings()
@@ -1162,24 +1185,13 @@ class WeiboCrawlerGUI:
             return
 
         # 保存AI配置(API/阈值/提示词)
-        from weibo_ai import AIConfig
-        cfg = AIConfig()
-        cfg.data.update({
-            "api_key": self.a_var_api_key.get().strip(),
-            "base_url": self.a_var_base_url.get().strip() or "https://api.deepseek.com",
-            "model": self.a_var_model.get().strip() or "deepseek-v4-flash",
-            "quality_threshold": self._a_int(self.a_var_quality.get(), 80),
-            "ad_threshold": self._a_int(self.a_var_ad.get(), 70),
-            "suspicious_low": self._a_int(self.a_var_susp.get(), 30),
-            "system_prompt": self.a_txt_prompt.get("1.0", "end").strip(),
-        })
+        cfg = self._ai_config_from_form()
         if not cfg.is_configured():
             messagebox.showwarning("未配置API", "请先在“API设置”中填写 API Key 并保存配置")
             return
         cfg.save()
 
         self._save_settings()
-        self._remember_blogger(uid, name)
         self.btn_ai.configure(state="disabled")
         self.btn_start.configure(state="disabled")  # 与爬取互斥
         self.ai_running = True
@@ -1235,12 +1247,12 @@ class WeiboCrawlerGUI:
                        f"失败 {result['failed']}\n"
                        f"消耗 tokens: {result['tokens']}\n"
                        f"输出目录: {os.path.join(kwargs['filter_root'], 'AI_' + kwargs['user_name'] + '_*')}")
-            self.root.after(0, self._on_ai_finish, msg, result)
+            self.root.after(0, self._on_ai_finish, msg, result, kwargs)
         except Exception as e:
             logger.error(f"AI分类异常: {e}", exc_info=True)
-            self.root.after(0, self._on_ai_finish, f"\nAI分类异常终止: {e}", None)
+            self.root.after(0, self._on_ai_finish, f"\nAI分类异常终止: {e}", None, None)
 
-    def _on_ai_finish(self, msg, result):
+    def _on_ai_finish(self, msg, result, kwargs=None):
         self._append_log(msg)
         self.btn_ai.configure(state="normal")
         self.btn_start.configure(state="normal")  # 解除与爬取的互斥
@@ -1251,6 +1263,9 @@ class WeiboCrawlerGUI:
             self.a_lbl_counts.configure(
                 text=f"高质量{result['high']} 广告{result['ad']} "
                      f"可疑{result['suspicious']} 低质量{result['low']} 失败{result['failed']}")
+            # 修复: AI分类确实找到文章并完成后,才把博主记入记录文件
+            if kwargs and result.get("total") and kwargs.get("user_id"):
+                self._remember_blogger(kwargs["user_id"], kwargs.get("user_name", ""))
         self._refresh_source_options()
         messagebox.showinfo("AI分类完成" if result and result["total"] else "AI分类",
                             msg, parent=self.root)
@@ -1294,7 +1309,11 @@ class WeiboCrawlerGUI:
             logger.warning(f"读取已有月份失败: {e}")
 
     def _refresh_source_options(self):
-        """根据已有 AI 分类文件夹刷新筛选页"数据源"下拉(扫描 筛选/ 与 AI分类/ 两处)"""
+        """根据已有 AI 分类文件夹刷新筛选页"数据源"下拉(扫描 筛选/ 与 AI分类/ 两处)
+
+        修复: AI分类完成后调用本方法;同时切换页签到"数据筛选"时也会再次刷新,
+        确保新生成的 AI_<博主>_<类别> 目录无需重启程序即可出现在下拉中。
+        """
         try:
             labels = {"ai_high": "高质量", "ai_ad": "广告", "ai_suspicious": "可疑"}
             roots = [self._resolve_filter_root(), self._resolve_ai_root()]
@@ -1314,9 +1333,15 @@ class WeiboCrawlerGUI:
                                else f"AI-{labels[v]}") for v in values}
             self._f_source_display_map = display_map
             self.f_source_combo.configure(values=list(display_map.values()))
+            # 兼容两种历史取值: 显示文本(新) 或 数据源键(旧设置/旧版本)
             cur = self.f_var_source.get()
-            if cur not in values:
-                self.f_var_source.set("DataPC")
+            key_by_display = {d: k for k, d in display_map.items()}
+            if cur in key_by_display:
+                pass  # 已是显示文本,保持用户当前选择
+            elif cur in display_map:
+                self.f_var_source.set(display_map[cur])  # 旧键值 -> 显示文本
+            else:
+                self.f_var_source.set("爬取数据(DataPC)")
         except Exception as e:
             logger.warning(f"刷新数据源选项失败: {e}")
 
@@ -1358,10 +1383,14 @@ class WeiboCrawlerGUI:
         try:
             filter_root = self._resolve_filter_root()
             blogger_dir = os.path.join(filter_root, f"{name}_{uid}")
-            prefix = f"{start}~{end}_"
+            # 兼容两种文件夹日期格式: 完整年份(旧) 与 省略"20"(新版更短)
+            short_start = start[2:] if start.startswith("20") else start
+            short_end = end[2:] if end.startswith("20") else end
+            prefixes = (f"{start}~{end}_", f"{short_start}~{short_end}_")
             if os.path.isdir(blogger_dir):
                 cands = [os.path.join(blogger_dir, d) for d in os.listdir(blogger_dir)
-                         if d.startswith(prefix) and os.path.isdir(os.path.join(blogger_dir, d))]
+                         if any(d.startswith(p) for p in prefixes)
+                         and os.path.isdir(os.path.join(blogger_dir, d))]
                 if cands:
                     target = max(cands, key=os.path.getmtime)
                     os.startfile(target)
@@ -1715,8 +1744,9 @@ class WeiboCrawlerGUI:
             messagebox.showwarning("参数不完整", "请填写博主昵称和微博ID")
             return
 
-        # 新博主自动记入博主记录文件
-        self._remember_blogger(uid, name)
+        # 修复: 不再提前把博主写入记录文件。
+        # 博主校验(ID存在/昵称匹配)通过并成功爬取后,在 _on_finish 里
+        # 用浏览器实际获取到的用户名追加,避免记录不存在或名称不匹配的博主。
 
         # 记住本次选择的日期,下次打开自动填入
         self._save_settings()
@@ -1757,15 +1787,22 @@ class WeiboCrawlerGUI:
             from weibo_ai import AIConfig
             ai_config = AIConfig()
             if not ai_config.is_configured():
-                messagebox.showwarning(
-                    "AI未配置",
-                    "已勾选“启用AI实时判断”,但尚未配置API Key。\n"
-                    "请先在“AI筛选”页签填写API Key并点击“保存配置”。")
-                self.running = False
-                self.btn_start.configure(state="normal")
-                self.btn_stop.configure(state="disabled")
-                self.lbl_status.configure(text="就绪", foreground="green")
-                return
+                # 修复: 用户在AI页签填了API但没点"保存配置"时,自动保存一次,
+                # 避免明明填了 Key 却提示未配置
+                if self.a_var_api_key.get().strip():
+                    ai_config = self._ai_config_from_form()
+                    ai_config.save()
+                    self._append_log("已自动保存AI页签中的API配置")
+                if not ai_config.is_configured():
+                    messagebox.showwarning(
+                        "AI未配置",
+                        "已勾选“启用AI实时判断”,但尚未配置API Key。\n"
+                        "请先在“AI筛选”页签填写API Key并点击“保存配置”。")
+                    self.running = False
+                    self.btn_start.configure(state="normal")
+                    self.btn_stop.configure(state="disabled")
+                    self.lbl_status.configure(text="就绪", foreground="green")
+                    return
             self._append_log(f"已启用AI实时判断(高质量可信度阈值 "
                              f"{ai_config.get('quality_threshold')}%)")
 
@@ -1791,6 +1828,7 @@ class WeiboCrawlerGUI:
             "ai_enabled": ai_enabled,
             "ai_config": ai_config,
             "ai_rename": ai_enabled and self.var_ai_rename.get(),
+            "ai_copy_media": ai_enabled and self.var_ai_copy_media.get(),
             "ai_root": self._resolve_ai_root(),
         }
 
@@ -1819,10 +1857,10 @@ class WeiboCrawlerGUI:
                     f"\nID文件: {result.get('txt_file') or '无'}\n"
                     f"MD目录: {result.get('md_dir') or '无'}"
                 )
-            self.root.after(0, self._on_finish, final_msg)
+            self.root.after(0, self._on_finish, final_msg, result, kwargs.get("user_id"))
         except Exception as e:
             logger.error(f"任务异常: {e}", exc_info=True)
-            self.root.after(0, self._on_finish, f"\n任务异常终止: {e}")
+            self.root.after(0, self._on_finish, f"\n任务异常终止: {e}", None, kwargs.get("user_id"))
 
     # ---------- 筛选 ----------
 
@@ -1887,7 +1925,21 @@ class WeiboCrawlerGUI:
         # 记住筛选页设置
         self._save_settings()
 
+        # 修复: 未勾选任何指标时默认勾选全部(按转评赞之和排序),
+        # 避免此前"未勾选指标时按日期排序"的怪异行为
+        if not (self.f_var_use_repost.get() or self.f_var_use_comment.get()
+                or self.f_var_use_like.get()):
+            self.f_var_use_repost.set(True)
+            self.f_var_use_comment.set(True)
+            self.f_var_use_like.set(True)
+            self._append_log("未勾选任何指标,已默认按 转发+评论+点赞 之和排序")
+
+        # 数据源: 下拉显示文本 -> 数据源键(兼容旧设置直接保存了键值)
         source = self.f_var_source.get()
+        key_by_display = {d: k for k, d in getattr(
+            self, "_f_source_display_map", {"DataPC": "爬取数据(DataPC)"}).items()}
+        source = key_by_display.get(source, source)
+
         self._append_log("=" * 60)
         self._append_log(f"开始筛选: 博主={name}({uid}), 时间={start} ~ {end}, "
                          f"前{top_n}篇, 数据源={source}")
@@ -1951,13 +2003,18 @@ class WeiboCrawlerGUI:
         self._append_log(msg)
         self.btn_filter.configure(state="normal")
 
-    def _on_finish(self, msg):
+    def _on_finish(self, msg, result=None, uid=None):
         self._append_log(msg)
         self.running = False
         self.btn_start.configure(state="normal")
         self.btn_stop.configure(state="disabled")
         self.btn_ai.configure(state="normal")  # 解除与AI分类的互斥
         is_error = "任务未完成" in msg or "任务异常" in msg
+        # 修复: 博主校验(存在/昵称匹配)通过且成功爬取后,才把博主记入记录文件,
+        # 且使用浏览器实际获取到的用户名(避免记录不存在博主或错误昵称)
+        if (not is_error and result and uid
+                and result.get("username") and not result.get("error")):
+            self._remember_blogger(uid, result["username"])
         self.lbl_status.configure(text="未完成" if is_error else "完成",
                                   foreground="red" if is_error else "green")
         messagebox.showinfo("任务未完成" if is_error else "任务完成", msg)
