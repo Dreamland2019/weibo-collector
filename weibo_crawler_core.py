@@ -35,6 +35,7 @@ from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import InvalidSelectorException
 from selenium.webdriver.edge.options import Options as EdgeOptions
 from selenium.webdriver.edge.service import Service as EdgeService
 from webdriver_manager.microsoft import EdgeChromiumDriverManager
@@ -53,6 +54,20 @@ def ensure_logger(log_level=logging.INFO):
         logger.addHandler(handler)
     logger.setLevel(log_level)
     return logger
+
+
+def _interruptible_sleep(seconds, stop_event=None):
+    """分段睡眠,期间检查停止标志;支持优雅停止(每段 1 秒)"""
+    if stop_event is None:
+        time.sleep(seconds)
+        return
+    remaining = float(seconds)
+    while remaining > 0:
+        if stop_event.is_set():
+            return
+        step = min(1.0, remaining)
+        time.sleep(step)
+        remaining -= step
 
 
 # ---------- 博主记录文件(DataPC/博主记录.txt) ----------
@@ -183,17 +198,30 @@ class ClassNameManager:
         "stats_num": "span",
     }
 
-    def __init__(self, config_path=None, manual_callback=None, logger=None):
+    def __init__(self, config_path=None, manual_callback=None, logger=None,
+                 detected_callback=None):
         """
         manual_callback: 手动输入类名的回调函数
             签名: callback(key, current_value) -> str
             返回用户输入的类名(不含前缀),返回空串/None 表示用户放弃输入
+        detected_callback: 类名更新(探测成功/手动输入生效)通知回调
+            签名: callback(key, new_value) -> str
+            用于把新类名同步到界面输入框/设置(修复 gui_settings 残留旧值)
         """
         self.logger = logger or logging.getLogger('weibo_crawler.classes')
         self.config_path = config_path or os.path.join(app_dir(), self.CONFIG_FILE)
         self.manual_callback = manual_callback
+        self.detected_callback = detected_callback
         self.classes = dict(self.DEFAULT_CLASSES)
         self.load()
+
+    def _notify_detected(self, key, value):
+        """类名确定后通知外部(如 GUI 同步输入框与 gui_settings)"""
+        if self.detected_callback:
+            try:
+                self.detected_callback(key, value)
+            except Exception as e:
+                self.logger.warning(f"类名更新通知失败: {e}")
 
     # ---------- 配置读写 ----------
 
@@ -265,6 +293,9 @@ class ClassNameManager:
                     else:
                         return current
                 self.logger.info(f"类名 {key}={current} 在页面中未找到有效元素,尝试自动探测")
+            except InvalidSelectorException:
+                # 修复: 非法选择器(如曾手动输入过 "1")不打印完整堆栈,一句话提示即可
+                self.logger.warning(f"类名 {key}={current} 不是合法的CSS选择器,尝试自动探测")
             except Exception as e:
                 self.logger.warning(f"验证类名 {key}={current} 时出错: {e}")
 
@@ -274,6 +305,7 @@ class ClassNameManager:
             self.set(key, detected)
             self.save()
             self.logger.info(f"已自动探测到类名 {key}: {detected}")
+            self._notify_detected(key, detected)
             return detected
 
         # 第3步:若页面根本没有目标数据(如博主该时间段无微博),跳过手动输入
@@ -306,13 +338,19 @@ class ClassNameManager:
                             if any(self._element_has_user_link(el, uid) for el in els[:5]):
                                 self.set(key, val)
                                 self.save()
+                                self._notify_detected(key, val)
                                 return val
                             self.logger.warning(f"输入的类名 {val} 未找到目标用户的链接,请确认")
                             continue
                         self.set(key, val)
                         self.save()
+                        self._notify_detected(key, val)
                         return val
                     self.logger.warning(f"输入的类名 {val} 在页面上找不到元素,请重新输入")
+                except InvalidSelectorException:
+                    # 修复: 非法选择器一句话提示,不打印完整堆栈
+                    self.logger.warning(f"输入的类名 {val} 不是合法的CSS选择器,请重新输入")
+                    continue
                 except Exception as e:
                     self.logger.warning(f"验证手动输入的类名 {val} 时出错: {e}")
                     continue
@@ -502,12 +540,14 @@ class WeiboPCCrawler:
     """
 
     def __init__(self, headless=False, user_data_dir=None,
-                 class_manager=None, wait_callback=None, manual_callback=None):
+                 class_manager=None, wait_callback=None, manual_callback=None,
+                 detected_callback=None):
         self.user_data_dir = user_data_dir
         self.headless = headless
         # manual_callback: 手动输入类名的回调,签名 (key, current) -> str
         self.manual_callback = manual_callback
-        self.classes = class_manager or ClassNameManager(manual_callback=manual_callback)
+        self.classes = class_manager or ClassNameManager(
+            manual_callback=manual_callback, detected_callback=detected_callback)
         # wait_callback: 等待用户操作(如手动登录后继续)的回调,签名 (message) -> None
         self.wait_callback = wait_callback
         self.driver = self.setup_driver(headless)
@@ -890,7 +930,7 @@ class WeiboPCCrawler:
     def collect_weibo_ids(self, user_id, start_date=None, end_date=None,
                           max_count=500, keyword="", is_ori=1, is_forward=0,
                           is_text=1, is_pic=1, is_video=1, is_music=1,
-                          user_name=None, min_words=0):
+                          user_name=None, min_words=0, stop_event=None):
         """收集指定用户指定时间范围内的微博 ID(原创/转发可选)
 
         min_words>0 时在列表页做粗过滤: 卡片预览字数低于该值的微博
@@ -949,11 +989,11 @@ class WeiboPCCrawler:
 
         # 边滚动边收集微博 ID
         weibo_ids = self._scroll_and_collect(user_id, card_cls, time_cls, max_count,
-                                             min_words=min_words)
+                                             min_words=min_words, stop_event=stop_event)
         return username, weibo_ids
 
     def _scroll_and_collect(self, user_id, card_cls, time_cls, max_count=500,
-                            min_words=0):
+                            min_words=0, stop_event=None):
         """渐进式滚动收集微博 ID"""
         weibo_ids = []
         processed_ids = set()
@@ -969,6 +1009,10 @@ class WeiboPCCrawler:
         while (len(weibo_ids) < max_count and
                scroll_attempts < max_scroll_attempts and
                no_progress_count < max_no_progress):
+
+            if stop_event is not None and stop_event.is_set():
+                logger.info("收到停止请求,停止收集微博ID(已找到 %d 条)" % len(weibo_ids))
+                break
 
             new_ids = self._extract_ids_from_cards(card_selector, time_cls, user_id,
                                                     processed_ids, min_words=min_words)
@@ -1333,7 +1377,8 @@ class WeiboPCCrawler:
                          export_format="md", skip_existing=False, min_words=0,
                          ai_enabled=False, ai_classifier=None, ai_config=None,
                          ai_usage_callback=None, ai_rename=False, ai_root=None,
-                         ai_copy_media=True):
+                         ai_copy_media=True, stop_event=None,
+                         stats_store=None, force_rejudge=False):
         """逐条抓取详情并导出(支持 md / docx 格式)
 
         参数:
@@ -1352,6 +1397,8 @@ class WeiboPCCrawler:
           ai_root                      AI分类输出根目录(默认 程序目录/AI分类)
           ai_copy_media                AI分类副本是否连带复制图片/视频
                                        (False 时md副本改为引用原网络链接)
+          stats_store                  WeiboStatsStore 实例(状态记录,可选)
+          force_rejudge                重跑时对已判定过的文章重新调用 AI(默认复用)
 
         返回 (成功数, 失败数, 跳过数, AI过滤数)
         """
@@ -1369,6 +1416,10 @@ class WeiboPCCrawler:
         total = len(weibo_ids)
 
         for i, weibo_id in enumerate(weibo_ids):
+            # 修复: 支持优雅停止(在每两条之间检查标志,当前条目正常收尾)
+            if stop_event is not None and stop_event.is_set():
+                logger.info(f"收到停止请求,停止导出(已完成 {ok_count} 条)")
+                break
             logger.info(f"正在处理第 {i + 1}/{total} 个微博: {weibo_id}")
             if progress_callback:
                 progress_callback(i + 1, total, weibo_id)
@@ -1389,7 +1440,7 @@ class WeiboPCCrawler:
                     need_media = True
 
                 if need_media:
-                    logger.info(f"文章已存在但媒体缺失,补下载媒体: {weibo_id}")
+                    logger.info(f"文章已存在,检查媒体完整性: {weibo_id}")
                     detail = self.get_weibo_detail(weibo_id, user_id)
                     if detail:
                         if download_images:
@@ -1399,18 +1450,53 @@ class WeiboPCCrawler:
                             else:
                                 # 确认无图,写标记避免下次重复检查
                                 self._mark_no_media(month_dir, weibo_id, "images")
+                                logger.info(f"确认无图片,已写标记: {weibo_id}")
                         if download_videos:
                             if detail.get("videos"):
                                 self._download_media(
                                     detail["videos"], month_dir, "videos", weibo_id)
                             else:
                                 self._mark_no_media(month_dir, weibo_id, "videos")
+                                logger.info(f"确认无视频,已写标记: {weibo_id}")
+                        # 更新状态记录中的媒体标记(供后续增量/更新转评赞使用)
+                        if stats_store:
+                            new_media = {}
+                            if download_images:
+                                new_media["images"] = bool(detail.get("images"))
+                            if download_videos:
+                                new_media["videos"] = bool(detail.get("videos"))
+                            if new_media:
+                                stats_store.set_record(
+                                    weibo_id, media=new_media,
+                                    publish=detail.get("publish_time", ""))
+                                stats_store.save()
                         skipped_count += 1  # 文章未重写,仍计入跳过
                         continue
                     # 详情获取失败则继续正常跳过
                 skipped_count += 1
                 logger.info(f"已存在同ID文件,跳过: {weibo_id}")
+                if stats_store:
+                    stats_store.set_record(weibo_id, exported=True)
+                    stats_store.save()
                 continue
+
+            # AI 判定复用(修复 AI 评分漂移): 之前被 AI 判定过且未导出的文章,
+            # 默认直接复用上次分数,不再重复抓详情+调用大模型;force_rejudge 时重新判断
+            rec = stats_store.get(weibo_id) if stats_store else None
+            prev_ai = ((rec or {}).get("ai") or {})
+            ai_quality = None
+            ai_title = None
+            if (ai_enabled and ai_classifier is not None and not force_rejudge
+                    and prev_ai and prev_ai.get("quality") is not None
+                    and not (rec or {}).get("exported")):
+                prev_q = int(prev_ai["quality"])
+                if prev_q < ai_quality_threshold:
+                    ai_skipped_count += 1
+                    logger.info(f"复用上次AI判定(可信度{prev_q}%<{ai_quality_threshold}%),"
+                                f"跳过: {weibo_id}")
+                    continue
+                logger.info(f"复用上次AI判定(可信度{prev_q}%): {weibo_id}")
+                ai_quality = prev_q
 
             detail = self.get_weibo_detail(weibo_id, user_id)
             if not detail:
@@ -1425,9 +1511,7 @@ class WeiboPCCrawler:
                 continue
 
             # AI 实时判断: 高质量可信度低于阈值则不导出(也不下载媒体)
-            ai_quality = None
-            ai_title = None
-            if ai_enabled and ai_classifier is not None:
+            if ai_enabled and ai_classifier is not None and ai_quality is None:
                 try:
                     _, _, quality_prob, usage = ai_classifier.classify(
                         detail.get("content", ""))
@@ -1440,6 +1524,11 @@ class WeiboPCCrawler:
                         logger.info(
                             f"AI判定非高质量(高质量可信度{ai_quality}% < "
                             f"{ai_quality_threshold}%),跳过且不下载媒体: {weibo_id}")
+                        if stats_store:
+                            stats_store.set_record(weibo_id,
+                                                   ai={"quality": ai_quality,
+                                                       "checked_at": _now_str()})
+                            stats_store.save()
                         continue
                     logger.info(f"AI判定高质量(高质量可信度{ai_quality}%): {weibo_id}")
                     # 可选: AI 总结生成标题(用于复制到 AI分类 目录时重命名)
@@ -1481,16 +1570,24 @@ class WeiboPCCrawler:
                     counter += 1
 
             # 下载图片/视频到本地(可选,先下载以便 md 引用本地文件)
+            # 修复: 确认无图/无视频时立即写 .nomedia 标记,
+            # 否则重跑时会被当作"媒体缺失"再抓一次详情(浪费且日志误导)
             local_images = []
             if download_images and detail.get("images"):
                 local_images = self._download_media(
                     detail["images"], month_dir, "images",
                     detail.get("weibo_id", ""))
+            elif download_images:
+                self._mark_no_media(month_dir, weibo_id, "images")
+                logger.info(f"确认无图片,已写标记: {weibo_id}")
             local_videos = []
             if download_videos and detail.get("videos"):
                 local_videos = self._download_media(
                     detail["videos"], month_dir, "videos",
                     detail.get("weibo_id", ""))
+            elif download_videos:
+                self._mark_no_media(month_dir, weibo_id, "videos")
+                logger.info(f"确认无视频,已写标记: {weibo_id}")
 
             # 生成内容并写入
             try:
@@ -1531,11 +1628,33 @@ class WeiboPCCrawler:
                 self._copy_to_ai_dir(output_path, user_name, save_time,
                                      ai_title, ai_root,
                                      copy_media=ai_copy_media, detail=detail)
+                # 状态记录: 标记"已实时AI分类"(事后AI分类据此跳过,避免内容相同的重复文件)
+                if stats_store:
+                    stats_store.set_record(weibo_id, ai_copied=True,
+                                           ai_title=ai_title, ai_copied_at=_now_str())
+                    stats_store.save()
+
+            # 更新状态记录: 导出结果/AI判定/转评赞/媒体(V0.5.2 状态记录)
+            if stats_store:
+                stats_store.set_record(
+                    weibo_id,
+                    exported=True,
+                    file=os.path.basename(output_path),
+                    publish=save_time,
+                    ai={"quality": ai_quality, "checked_at": _now_str()}
+                    if ai_quality is not None else None,
+                    stats={"repost": detail["repost_count"],
+                           "comment": detail["comment_count"],
+                           "like": detail["like_count"],
+                           "checked_at": _now_str()},
+                    media={"images": bool(local_images),
+                           "videos": bool(local_videos)})
+                stats_store.save()
 
             if i < total - 1:
                 sleep_time = random.randint(min_interval, max_interval)
                 logger.info(f"等待 {sleep_time} 秒后处理下一个...")
-                time.sleep(sleep_time)
+                _interruptible_sleep(sleep_time, stop_event)
 
         logger.info(f"导出完成: 成功 {ok_count} 条, 失败 {fail_count} 条, "
                     f"跳过 {skipped_count} 条, AI过滤 {ai_skipped_count} 条")
@@ -1964,6 +2083,235 @@ class WeiboPCCrawler:
 
 
 # ---------------------------------------------------------------------------
+# 微博状态记录: 每个 ID 的导出状态/AI判定/转评赞/媒体
+# ---------------------------------------------------------------------------
+
+STATS_FILE = "微博状态.json"
+
+
+class WeiboStatsStore:
+    """博主级状态记录(DataPC/<博主>_<ID>/微博状态.json)
+
+    记录每个微博 ID 的:
+      exported       是否已导出文件
+      file           导出文件名(所在月份目录)
+      publish        发布时间(用于定位月份目录)
+      ai             {quality, checked_at} AI判定分数与时间
+      stats          {repost, comment, like, checked_at} 转评赞与最后检查时间
+      media          {images, videos} 是否已下载
+
+    用途:
+      1. 重跑时复用 AI 判定结果,避免重复抓详情/调用大模型(修复 AI 评分漂移问题)
+      2. 支撑"更新转评赞":按已导出 ID 逐篇抓详情,只刷新数字不重写正文
+      3. 后续(如 V0.7.0 增量模式)可直接读取状态判断"哪些文章还没处理"
+    """
+
+    def __init__(self, blogger_dir):
+        self.path = os.path.join(blogger_dir, STATS_FILE)
+        self.data = {"records": {}}
+        self.load()
+
+    def load(self):
+        try:
+            if os.path.exists(self.path):
+                with open(self.path, "r", encoding="utf-8") as f:
+                    d = json.load(f)
+                if isinstance(d, dict) and isinstance(d.get("records"), dict):
+                    self.data = d
+        except Exception as e:
+            logger.warning(f"读取状态记录失败: {e}")
+
+    def save(self):
+        try:
+            with open(self.path, "w", encoding="utf-8") as f:
+                json.dump(self.data, f, ensure_ascii=False, indent=2)
+            return True
+        except Exception as e:
+            logger.warning(f"写入状态记录失败: {e}")
+            return False
+
+    def get(self, weibo_id):
+        return self.data["records"].get(weibo_id)
+
+    def set_record(self, weibo_id, **fields):
+        rec = self.data["records"].setdefault(weibo_id, {})
+        for k, v in fields.items():
+            if v is None:
+                rec.pop(k, None)
+            else:
+                rec[k] = v
+
+    def exported_ids(self):
+        return [wid for wid, r in self.data["records"].items()
+                if r.get("exported") and r.get("file")]
+
+    def exported_ids_in_range(self, start_date=None, end_date=None):
+        """按 publish 过滤已导出ID(YYYY-MM-DD;publish 未知的保守包含)"""
+        start = datetime.strptime(start_date, "%Y-%m-%d") if start_date else None
+        end = datetime.strptime(end_date, "%Y-%m-%d") if end_date else None
+        if start is None and end is None:
+            return self.exported_ids()
+        out = []
+        for wid in self.exported_ids():
+            d = _parse_publish_date((self.get(wid) or {}).get("publish"))
+            if d is None:
+                out.append(wid)  # 未知日期:保守包含,确保不漏
+                continue
+            if start and d < start:
+                continue
+            if end and d > end:
+                continue
+            out.append(wid)
+        return out
+
+
+def _now_str():
+    return datetime.now().strftime("%y-%m-%d %H:%M")
+
+
+def _update_stats_in_file(path, repost, comment, like):
+    """仅更新 md/docx 文件中的 转发数/评论数/点赞数 三行(不重写正文)
+
+    返回 True=更新成功, False=读取/写入失败
+    """
+    try:
+        if path.endswith(".md"):
+            with open(path, "r", encoding="utf-8") as f:
+                text = f.read()
+            text = re.sub(r"(>转发数[:：]\s*)[\d.,万亿]+", rf"\g<1>{repost}", text)
+            text = re.sub(r"(>评论数[:：]\s*)[\d.,万亿]+", rf"\g<1>{comment}", text)
+            text = re.sub(r"(>点赞数[:：]\s*)[\d.,万亿]+", rf"\g<1>{like}", text)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text)
+            return True
+        if path.endswith(".docx"):
+            from docx import Document
+            doc = Document(path)
+            updated = False
+            for p in doc.paragraphs:
+                m = re.match(r"^(转发数|评论数|点赞数)[:：]\s*[\d.,万亿]+$", p.text.strip())
+                if not m:
+                    continue
+                label, value = m.group(1), {"转发数": repost, "评论数": comment, "点赞数": like}[m.group(1)]
+                if not p.runs:
+                    continue
+                p.runs[0].text = f"{label}：{value}"
+                for run in p.runs[1:]:
+                    run.text = ""
+                updated = True
+            if updated:
+                doc.save(path)
+                return True
+            logger.warning(f"docx 中未找到转评赞行: {path}")
+            return False
+    except Exception as e:
+        logger.warning(f"更新转评赞失败 {path}: {e}")
+        return False
+
+
+def _parse_publish_date(publish):
+    """从状态记录 publish 字段解析日期,兼容 "25-1-10 12:00" / "2025-01-10" 等格式"""
+    if not publish:
+        return None
+    m = re.search(r"(\d{2,4})-(\d{1,2})-(\d{1,2})", str(publish))
+    if not m:
+        return None
+    y = int(m.group(1))
+    y = y + 2000 if y < 100 else y
+    try:
+        return datetime(y, int(m.group(2)), int(m.group(3)))
+    except ValueError:
+        return None
+
+
+def update_stats_for_blogger(user_id, user_name, blogger_dir, headless=False,
+                             user_data_dir=None, min_interval=3, max_interval=8,
+                             progress_callback=None, wait_callback=None,
+                             stop_event=None, keep_browser_open=False,
+                             start_date=None, end_date=None):
+    """按状态记录更新已导出文章的转评赞(月末/季末/年末跑一次)
+
+    start_date/end_date(YYYY-MM-DD)可选: 只更新该日期范围内的已导出文章
+    (按状态记录 publish 过滤;publish 未知的记录在给定范围时保守包含,确保不漏)。
+
+    逐篇抓详情 → 只更新 md/docx 中的 转发/评论/点赞 数字与状态记录检查时间;
+    不重写正文、不调用 AI。支持优雅停止(每篇完成即写状态,中断不丢已更新部分)。
+    返回 {"updated": n, "failed": n, "message": str}
+    """
+    ensure_logger()
+    store = WeiboStatsStore(blogger_dir)
+    ids = store.exported_ids_in_range(start_date, end_date)
+    if not ids:
+        msg = ("状态记录中没有符合范围要求的已导出文章"
+               + (f"({start_date or '全部'} ~ {end_date or '全部'})"
+                  if (start_date or end_date) else "(请先爬取一次生成状态记录)"))
+        logger.warning(msg)
+        return {"updated": 0, "failed": 0, "message": msg}
+
+    crawler = WeiboPCCrawler(headless=headless, user_data_dir=user_data_dir,
+                             wait_callback=wait_callback)
+    updated = failed = 0
+    try:
+        if not crawler.check_login_status():
+            logger.warning("未检测到登录状态,尝试手动登录")
+            if not crawler.manual_login():
+                return {"updated": 0, "failed": 0, "message": "登录失败,无法更新转评赞"}
+
+        total = len(ids)
+        for i, wid in enumerate(ids, 1):
+            if stop_event is not None and stop_event.is_set():
+                logger.info("收到停止请求,停止更新转评赞")
+                break
+            if progress_callback:
+                try:
+                    progress_callback(i, total, wid)
+                except Exception:
+                    pass
+            detail = crawler.get_weibo_detail(wid, user_id)
+            if not detail:
+                failed += 1
+                logger.warning(f"获取详情失败,跳过: {wid}")
+                continue
+            rec = store.get(wid) or {}
+            fname = rec.get("file") or ""
+            path = ""
+            if fname:
+                # 优先按记录中的月份目录定位,找不到再全目录搜索
+                month_dir = WeiboPCCrawler._publish_month_dir(
+                    rec.get("publish") or "", blogger_dir)
+                cand = os.path.join(month_dir, fname)
+                if os.path.exists(cand):
+                    path = cand
+            if not path:
+                found = crawler._find_weibo_dir(blogger_dir, wid)
+                if found:
+                    for f in os.listdir(found):
+                        if f.endswith(f"_{wid}.md") or f.endswith(f"_{wid}.docx"):
+                            path = os.path.join(found, f)
+                            break
+            if path and _update_stats_in_file(path, detail["repost_count"],
+                                              detail["comment_count"],
+                                              detail["like_count"]):
+                updated += 1
+                logger.info(f"已更新转评赞: {os.path.basename(path)}")
+            else:
+                failed += 1
+                logger.warning(f"未找到文章文件,跳过: {wid}")
+            store.set_record(
+                wid,
+                stats={"repost": detail["repost_count"], "comment": detail["comment_count"],
+                       "like": detail["like_count"], "checked_at": _now_str()})
+            store.save()
+            if i < total:
+                _interruptible_sleep(random.randint(min_interval, max_interval), stop_event)
+    finally:
+        if not keep_browser_open:
+            crawler.close(force_close=True)
+
+    return {"updated": updated, "failed": failed, "message": ""}
+
+
+# ---------------------------------------------------------------------------
 # 一键任务:收集 + 导出
 # ---------------------------------------------------------------------------
 
@@ -1977,7 +2325,8 @@ def run_task(user_id, user_name, start_date, end_date,
              download_images=False, download_videos=False,
              export_format="md", skip_existing=False, min_words=0,
              ai_enabled=False, ai_config=None, ai_usage_callback=None,
-             ai_rename=False, ai_root=None, ai_copy_media=True):
+             ai_rename=False, ai_root=None, ai_copy_media=True,
+             detected_callback=None, stop_event=None, force_rejudge=False):
     """一键爬取任务:收集指定时间范围的微博ID并导出
 
     参数:
@@ -2004,6 +2353,9 @@ def run_task(user_id, user_name, start_date, end_date,
       ai_root                AI分类输出根目录(默认 程序目录/AI分类)
       ai_copy_media          AI分类副本是否连带复制图片/视频
                              (False 时md副本改为引用原网络链接)
+      force_rejudge          重跑时对状态记录中已判定过的文章重新调用AI(默认复用上次分数)
+      detected_callback      类名更新通知回调(同步GUI输入框用),签名 (key, value)
+      stop_event             threading.Event,设置后优雅停止(当前条目收尾后停止)
 
     返回 dict:
       {"username", "weibo_ids", "txt_file", "md_dir", "exported", "failed",
@@ -2019,7 +2371,8 @@ def run_task(user_id, user_name, start_date, end_date,
 
     crawler = WeiboPCCrawler(headless=headless, user_data_dir=user_data_dir,
                              wait_callback=wait_callback,
-                             manual_callback=manual_callback)
+                             manual_callback=manual_callback,
+                             detected_callback=detected_callback)
 
     # 日期 +1 天:抵消微博时间换算导致的实际搜索范围偏移(沿用原脚本经验)
     start_search = (datetime.strptime(start_date, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
@@ -2028,7 +2381,7 @@ def run_task(user_id, user_name, start_date, end_date,
     result = {
         "username": user_name, "weibo_ids": [], "txt_file": None,
         "md_dir": None, "exported": 0, "failed": 0, "skipped": 0,
-        "ai_skipped": 0, "ai_tokens": 0,
+        "ai_skipped": 0, "ai_tokens": 0, "stopped": False,
     }
 
     # AI 实时判断: 构建分类器(API 未配置时仅警告,不启用AI)
@@ -2070,12 +2423,15 @@ def run_task(user_id, user_name, start_date, end_date,
             is_video=is_video, is_music=is_music,
             user_name=user_name,
             min_words=min_words,
+            stop_event=stop_event,
         )
         if not weibo_ids:
             logger.warning(
                 f"未收集到任何微博:博主 {user_name}({user_id}) 在 "
-                f"{start_date} ~ {end_date} 期间可能没有发表符合条件(原创长文)的微博,"
-                f"或该时间段内博主处于禁言/停更状态。请确认时间范围后重试。")
+                f"{start_date} ~ {end_date} 期间没有符合条件(原创长文)的微博"
+                f"(可能停更/禁言或时间范围不符)。请确认时间范围后重试。\n"
+                f"提示:如该时间段实际已爬取过,可取消勾选“跳过已爬取的文章”"
+                f"强制重新处理。")
             return result
         if username and username != user_id:
             result["username"] = username
@@ -2096,6 +2452,7 @@ def run_task(user_id, user_name, start_date, end_date,
 
         # 3. 导出(新结构: 博主目录/年份/月份/文件,重跑时覆盖同名文件)
         result["md_dir"] = data_dir
+        stats_store = WeiboStatsStore(data_dir)
         ok_count, fail_count, skipped_count, ai_skipped_count = crawler.export_markdowns(
             weibo_ids, user_id, result["username"], data_dir,
             progress_callback=progress_callback, overwrite=True,
@@ -2108,12 +2465,16 @@ def run_task(user_id, user_name, start_date, end_date,
             ai_config=ai_config, ai_usage_callback=ai_usage_callback,
             ai_rename=ai_rename,
             ai_root=ai_root or os.path.join(app_dir(), "AI分类"),
-            ai_copy_media=ai_copy_media)
+            ai_copy_media=ai_copy_media,
+            stop_event=stop_event,
+            stats_store=stats_store,
+            force_rejudge=force_rejudge)
         result["exported"] = ok_count
         result["failed"] = fail_count
         result["skipped"] = skipped_count
         result["ai_skipped"] = ai_skipped_count
         result["ai_tokens"] = ai_tokens[0]
+        result["stats_file"] = stats_store.path
 
     except RuntimeError as e:
         # 预期内的业务错误(如博主该时间段无微博、类名无法确定),只提示不打印堆栈
@@ -2123,6 +2484,7 @@ def run_task(user_id, user_name, start_date, end_date,
         logger.error(f"程序执行过程中出现错误: {e}", exc_info=True)
         result["error"] = str(e)
     finally:
+        result["stopped"] = bool(stop_event is not None and stop_event.is_set())
         if not keep_browser_open:
             crawler.close(force_close=True)
 

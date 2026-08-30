@@ -264,7 +264,8 @@ class AIRunner:
 
     def __init__(self, classifier, data_root=None, filter_root="AI分类"):
         self.classifier = classifier
-        self.config = classifier.config
+        # 允许 classifier=None(仅用于 scan_files 等静态用途,如GUI运行前检测)
+        self.config = classifier.config if classifier is not None else None
         self.data_root = data_root or os.path.join(app_dir(), "DataPC")
         self.filter_root = filter_root
 
@@ -415,7 +416,8 @@ class AIRunner:
     def run(self, user_name, user_id, start_date, end_date,
             source_format="md", resume=True, keep_source=True,
             summary_enabled=False, keep_original=False,
-            progress_callback=None, usage_callback=None):
+            progress_callback=None, usage_callback=None,
+            pre_skipped_ids=None, include_pre_copied=False):
         """执行事后分类
 
         keep_source=True   : 复制到类别目录,原文件保留在 DataPC(默认)
@@ -425,16 +427,18 @@ class AIRunner:
           - keep_original=False : 文件名重命名为 <AI标题>_<年-月-日>.ext(默认)
         progress_callback(i, total, wid) 每篇开始前调用
         usage_callback(total_tokens) 每次AI调用后调用(累计值)
+        pre_skipped_ids  状态记录中"已实时AI分类"的微博ID列表(默认跳过,避免重复文件)
+        include_pre_copied=True 时忽略 pre_skipped_ids,重新分类(会产生第二份副本)
 
         返回 dict: {"total", "high", "ad", "suspicious", "low",
-                     "failed", "tokens", "output_dir", "summaries"}
+                     "failed", "tokens", "output_dir", "summaries", "pre_skipped"}
         """
         files = self.scan_files(user_id, start_date, end_date, source_format)
         if not files:
             logger.warning(f"未找到博主 {user_name}({user_id}) 的 {source_format} 文件")
             return {"total": 0, "high": 0, "ad": 0, "suspicious": 0,
                     "low": 0, "failed": 0, "tokens": 0,
-                    "output_dir": None, "summaries": []}
+                    "output_dir": None, "summaries": [], "pre_skipped": 0}
 
         # 预处理: 提取文件名中的微博ID与发布日期
         file_records = []
@@ -445,10 +449,12 @@ class AIRunner:
             file_records.append((fpath, wid, fdate))
 
         processed = self._load_progress(user_id) if resume else set()
+        pre_skipped = set(pre_skipped_ids or []) if not include_pre_copied else set()
         total = len(file_records)
         counts = {CAT_HIGH: 0, CAT_AD: 0, CAT_SUSPICIOUS: 0, CAT_LOW: 0}
         failed = 0
         skipped_processed = 0
+        skipped_pre = 0
         total_tokens = 0
         summaries = []  # (原文件名, AI标题, 类别)
 
@@ -463,6 +469,12 @@ class AIRunner:
             if resume and wid in processed:
                 skipped_processed += 1
                 logger.info(f"[{i}/{total}] 已处理过,跳过: {wid}")
+                continue
+            # 修复: 已实时AI分类的文章默认跳过,避免生成内容相同、标题不同的重复文件
+            # (不计入进度,勾选"包含已实时分类的文章"后下次可重新分类)
+            if wid in pre_skipped:
+                skipped_pre += 1
+                logger.info(f"[{i}/{total}] 已实时AI分类,跳过: {wid}")
                 continue
             if progress_callback:
                 progress_callback(i, total, wid)
@@ -558,12 +570,14 @@ class AIRunner:
             "low": counts[CAT_LOW],
             "failed": failed,
             "skipped": skipped_processed,
+            "pre_skipped": skipped_pre,
             "tokens": total_tokens,
             "output_dir": self.filter_root,
             "summaries": summaries,
         }
         logger.info(
-            f"AI分类完成: 共{total}篇(已跳过{skipped_processed}篇) "
+            f"AI分类完成: 共{total}篇(已跳过{skipped_processed}篇 "
+            f"已处理过,{skipped_pre}篇已实时AI分类) "
             f"高质量{counts[CAT_HIGH]} 广告{counts[CAT_AD]} "
             f"可疑{counts[CAT_SUSPICIOUS]} 低质量{counts[CAT_LOW]} 失败{failed} "
             f"消耗{total_tokens}tokens")

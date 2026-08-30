@@ -123,7 +123,7 @@ class LogQueueHandler(logging.Handler):
 class WeiboCrawlerGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("微博长文收集记录整理器 v0.5.1")
+        self.root.title("微博长文收集记录整理器 v0.5.2")
         self.root.geometry("900x760")
         self.root.minsize(840, 680)
 
@@ -137,6 +137,8 @@ class WeiboCrawlerGUI:
         self.worker = None
         self.running = False      # 爬取任务运行中
         self.ai_running = False   # AI分类任务运行中(与爬取互斥)
+        self.stats_running = False  # 更新转评赞运行中(与爬取/AI互斥)
+        self.stop_event = threading.Event()  # 优雅停止:后台爬取循环检查该标志
         self.settings = self._load_settings()
 
         self._build_ui()
@@ -216,6 +218,7 @@ class WeiboCrawlerGUI:
             "ai_enabled": self.var_ai_enabled.get(),
             "ai_rename": self.var_ai_rename.get(),
             "ai_copy_media": self.var_ai_copy_media.get(),
+            "force_rejudge": self.var_force_rejudge.get(),
         }
         # 筛选页设置
         if hasattr(self, "f_var_name"):
@@ -255,6 +258,7 @@ class WeiboCrawlerGUI:
                 "a_summary": self.a_var_summary.get(),
                 "a_keep_source": self.a_var_keep_source.get(),
                 "a_keep_original": self.a_var_keep_original.get(),
+                "a_include_pre": self.a_var_include_pre.get(),
             })
         # 类名覆盖
         for key, var in self.class_vars.items():
@@ -290,6 +294,7 @@ class WeiboCrawlerGUI:
         self.var_ai_enabled.set(bool(st.get("ai_enabled", False)))
         self.var_ai_rename.set(bool(st.get("ai_rename", False)))
         self.var_ai_copy_media.set(bool(st.get("ai_copy_media", True)))
+        self.var_force_rejudge.set(bool(st.get("force_rejudge", False)))
         # 筛选页设置恢复
         if hasattr(self, "f_var_name"):
             self.f_var_name.set(st.get("f_name", self.f_var_name.get()))
@@ -325,6 +330,7 @@ class WeiboCrawlerGUI:
             self.a_var_summary.set(bool(st.get("a_summary", True)))
             self.a_var_keep_source.set(bool(st.get("a_keep_source", True)))
             self.a_var_keep_original.set(bool(st.get("a_keep_original", False)))
+            self.a_var_include_pre.set(bool(st.get("a_include_pre", False)))
         for key, var in self.class_vars.items():
             val = st.get(f"class_{key}", "")
             if val:
@@ -513,6 +519,9 @@ class WeiboCrawlerGUI:
         self.var_export_format = tk.StringVar(value="md")
         ttk.Combobox(row2b, textvariable=self.var_export_format, values=["md", "docx"],
                      width=6, state="readonly").pack(side="left")
+        self._hint_icon(row2b, "未勾选下载视频时,文章里保留原微博视频链接,在线观看即可;"
+                        "勾选后视频会下载到本地(单个视频文件通常几十MB,将占用较多存储空间)",
+                        pack=dict(side="left", padx=4))
 
         row2c = ttk.Frame(frame_top)
         row2c.pack(fill="x", pady=(6, 0))
@@ -521,7 +530,8 @@ class WeiboCrawlerGUI:
                         variable=self.var_skip_existing).pack(side="left")
         self.var_headless = tk.BooleanVar(value=False)
         ttk.Checkbutton(row2c, text="无头模式(不显示浏览器)", variable=self.var_headless).pack(side="left")
-        self._hint_icon(row2c, "重新爬取时,已存在同ID文件的不再抓取(增量补下载媒体)",
+        self._hint_icon(row2c, "重新爬取时,已存在同ID文件的不再抓取(增量补下载媒体);"
+                        "无头模式不显示浏览器窗口,与“完成后保留浏览器”互斥",
                         pack=dict(side="left", padx=4))
 
         # AI 实时判断(任务参数最后一行;API 在"AI筛选"页签配置)
@@ -530,23 +540,27 @@ class WeiboCrawlerGUI:
         self.var_ai_enabled = tk.BooleanVar(value=False)
         ttk.Checkbutton(row2d, text="启用AI实时判断",
                         variable=self.var_ai_enabled).pack(side="left")
+        self._hint_icon(row2d, "逐篇调用AI判断“高质量可信度”,低于阈值不导出也不下载媒体",
+                        pack=dict(side="left", padx=4))
         self.var_ai_rename = tk.BooleanVar(value=False)
         ttk.Checkbutton(row2d, text="AI总结并重命名标题",
                         variable=self.var_ai_rename).pack(side="left", padx=(6, 0))
+        self._hint_icon(row2d, "AI判定通过的文章会复制重命名到“AI分类”目录"
+                        "(如 26-1-22_标题.md,原文件保留)",
+                        pack=dict(side="left", padx=4))
         # 修复: 实时AI复制时,默认连图片/视频一起复制到AI分类目录
         # (此前只复制文章文件,导致AI副本里的图片引用是坏的)
         self.var_ai_copy_media = tk.BooleanVar(value=True)
         ttk.Checkbutton(row2d, text="分类时复制媒体(图片/视频)",
                         variable=self.var_ai_copy_media).pack(side="left", padx=(6, 0))
+        self._hint_icon(row2d, "默认勾选:把文章配图/视频一并复制到AI分类目录;"
+                        "取消勾选:AI副本中的媒体引用原微博网络链接,"
+                        "不占用本地空间(需联网查看)",
+                        pack=dict(side="left", padx=4))
         self.btn_ai_test = ttk.Button(row2d, text="测试连接",
                                       command=lambda: self._test_ai_connection(self.btn_ai_test))
         self.btn_ai_test.pack(side="left", padx=8)
-        self._hint_icon(row2d, "启用AI后:逐篇调用AI判断“高质量可信度”,低于阈值不导出也不下载媒体;"
-                        "勾选“AI总结并重命名标题”后,通过的文章会复制重命名到“AI分类”目录"
-                        "(如 26-1-22_标题.md,原文件保留);“分类时复制媒体”默认勾选:"
-                        "把文章配图/视频一并复制到AI分类目录;取消勾选则AI副本中的媒体"
-                        "引用原微博网络链接,不占用本地空间(需联网查看);"
-                        "API配置在“AI分类”页签",
+        self._hint_icon(row2d, "API配置在“AI分类”页签(API Key/接口地址/模型)",
                         pack=dict(side="left", padx=4))
 
         # 高级设置
@@ -563,8 +577,38 @@ class WeiboCrawlerGUI:
         row4.pack(fill="x", pady=(6, 0))
         self.var_keep_browser = tk.BooleanVar(value=False)
         ttk.Checkbutton(row4, text="完成后保留浏览器", variable=self.var_keep_browser).pack(side="left")
+        self._hint(row4, "  (仅在有头模式时有效;无头模式下勾选会导致浏览器在后台残留,影响下次爬取)",
+                   pack=dict(side="left", padx=4))
         self.var_skip_export = tk.BooleanVar(value=False)
         ttk.Checkbutton(row4, text="只收集ID不导出MD", variable=self.var_skip_export).pack(side="left", padx=10)
+
+        # 修复: 无头模式 与 完成后保留浏览器 互斥(同时勾选会在后台残留浏览器进程)
+        def _on_headless_changed(*_a):
+            if self.var_headless.get() and self.var_keep_browser.get():
+                self.var_keep_browser.set(False)
+                self._append_log("无头模式已自动取消“完成后保留浏览器”(两者互斥)")
+        def _on_keep_browser_changed(*_a):
+            if self.var_keep_browser.get() and self.var_headless.get():
+                self.var_headless.set(False)
+                self._append_log("“完成后保留浏览器”已自动取消无头模式(两者互斥)")
+        self.var_headless.trace_add("write", _on_headless_changed)
+        self.var_keep_browser.trace_add("write", _on_keep_browser_changed)
+
+        # 重跑时重新AI判断 + 更新转评赞(状态记录)
+        row4c = ttk.Frame(frame_adv)
+        row4c.pack(fill="x", pady=(6, 0))
+        self.var_force_rejudge = tk.BooleanVar(value=False)
+        ttk.Checkbutton(row4c, text="重跑时重新AI判断",
+                        variable=self.var_force_rejudge).pack(side="left")
+        self._hint_icon(row4c, "默认不勾选:已AI判定过的文章直接复用上次分数(省时省tokens、结果稳定);"
+                        "勾选后每次都重新调用AI判断(大模型评分可能略有波动)",
+                        pack=dict(side="left", padx=4))
+        self.btn_update_stats = ttk.Button(row4c, text="更新转评赞",
+                                           command=self._start_update_stats)
+        self.btn_update_stats.pack(side="left", padx=(16, 0))
+        self._hint_icon(row4c, "按状态记录逐篇重新抓取已导出文章的转发/评论/点赞数字"
+                        "(只改数字,不重写正文、不调用AI);建议月末/季末/年末各跑一次",
+                        pack=dict(side="left", padx=4))
 
         # 爬取间隔可自定义
         row4b = ttk.Frame(frame_adv)
@@ -961,6 +1005,47 @@ class WeiboCrawlerGUI:
         self._build_date_picker(run_row2, self.a_var_end_year, self.a_var_end_month,
                                 self.a_var_end_day, None)
 
+        # 已有月份选择(与筛选页一致): 选起止月自动填充日期范围
+        run_row2a = ttk.Frame(frame_run)
+        run_row2a.pack(fill="x", pady=(4, 0))
+        ttk.Label(run_row2a, text="已有月份:").pack(side="left")
+        ttk.Label(run_row2a, text="从").pack(side="left", padx=(4, 0))
+        self.a_var_month_from = tk.StringVar(value="")
+        self.a_month_from_combo = ttk.Combobox(run_row2a, textvariable=self.a_var_month_from,
+                                               width=10, state="readonly")
+        self.a_month_from_combo.pack(side="left", padx=2)
+        ttk.Label(run_row2a, text="到").pack(side="left")
+        self.a_var_month_to = tk.StringVar(value="")
+        self.a_month_to_combo = ttk.Combobox(run_row2a, textvariable=self.a_var_month_to,
+                                             width=10, state="readonly")
+        self.a_month_to_combo.pack(side="left", padx=2)
+        ttk.Button(run_row2a, text="刷新月份",
+                   command=self._load_month_options_ai).pack(side="left", padx=6)
+        self._hint_icon(run_row2a, "自动读取该博主已爬取的月份,选择后自动填充日期范围;"
+                        "也可继续手动修改上面的日期",
+                        pack=dict(side="left", padx=4))
+
+        def _a_on_month_from(event=None):
+            m = re.match(r"(\d{4})年(\d{1,2})月", self.a_var_month_from.get() or "")
+            if m:
+                self.a_var_start_year.set(m.group(1))
+                self.a_var_start_month.set(f"{int(m.group(2)):02d}")
+                self.a_var_start_day.set("01")
+
+        def _a_on_month_to(event=None):
+            m = re.match(r"(\d{4})年(\d{1,2})月", self.a_var_month_to.get() or "")
+            if m:
+                _, end = self._month_range(m.group(1), f"{int(m.group(2)):02d}")
+                y, mo, d = end.split("-")
+                self.a_var_end_year.set(y)
+                self.a_var_end_month.set(mo)
+                self.a_var_end_day.set(d)
+
+        self.a_month_from_combo.bind("<<ComboboxSelected>>", _a_on_month_from)
+        self.a_month_to_combo.bind("<<ComboboxSelected>>", _a_on_month_to)
+        # 博主昵称/ID变化时刷新月份选项
+        self.a_var_uid.trace_add("write", lambda *a: self._load_month_options_ai())
+
         # 数据格式/输出文件夹 单独一行(避免与日期行挤在一起)
         run_row2b = ttk.Frame(frame_run)
         run_row2b.pack(fill="x", pady=(4, 0))
@@ -980,13 +1065,31 @@ class WeiboCrawlerGUI:
         self.a_var_summary = tk.BooleanVar(value=True)
         ttk.Checkbutton(run_row3, text="启用AI总结(生成标题)",
                         variable=self.a_var_summary).pack(side="left")
+        self._hint_icon(run_row3, "逐篇调用AI生成标题,写入各类别目录的AI总结.txt;"
+                        "配合下方“保留原标题”决定是否同时重命名文件",
+                        pack=dict(side="left", padx=4))
         self.a_var_keep_source = tk.BooleanVar(value=True)
         ttk.Checkbutton(run_row3, text="保留原文件(默认勾选,不移动)",
                         variable=self.a_var_keep_source).pack(side="left", padx=10)
+        self._hint_icon(run_row3, "勾选:原文件保留在DataPC,类别目录放副本;"
+                        "不勾选:把原文件移动到类别目录(DataPC不留)",
+                        pack=dict(side="left", padx=4))
+
+        # 修复: 原一行四个选项过长,拆两行;长说明改收进ⓘ
+        run_row3b = ttk.Frame(frame_run)
+        run_row3b.pack(fill="x", pady=(4, 0))
         self.a_var_keep_original = tk.BooleanVar(value=False)
-        ttk.Checkbutton(run_row3, text="保留原标题(不勾选则重命名为“日期_AI标题”,按名称排序即按日期)",
-                        variable=self.a_var_keep_original).pack(side="left", padx=10)
-        self._hint_icon(run_row3, "总结标题会写入各类别目录的 AI总结.txt",
+        ttk.Checkbutton(run_row3b, text="保留原标题",
+                        variable=self.a_var_keep_original).pack(side="left")
+        self._hint_icon(run_row3b, "勾选:文件名保持不变,标题写入AI总结.txt;"
+                        "不勾选:文件名重命名为“日期_AI标题”(按名称排序即按日期)",
+                        pack=dict(side="left", padx=4))
+        self.a_var_include_pre = tk.BooleanVar(value=False)
+        ttk.Checkbutton(run_row3b, text="包含已实时分类的文章",
+                        variable=self.a_var_include_pre).pack(side="left", padx=(16, 0))
+        self._hint_icon(run_row3b, "默认不勾选:已通过“实时AI总结重命名”复制到AI分类/高质量的文章,"
+                        "事后分类时自动跳过(避免内容相同但标题不同的重复文件);"
+                        "勾选后一并重新分类(会产生第二份副本)",
                         pack=dict(side="left", padx=4))
 
         run_row4 = ttk.Frame(frame_run)
@@ -1192,12 +1295,46 @@ class WeiboCrawlerGUI:
         cfg.save()
 
         self._save_settings()
+
+        # 检测"已实时AI分类"的文章: 默认跳过,避免内容相同但标题不同的重复文件
+        pre_skipped_ids = []
+        if not self.a_var_include_pre.get():
+            try:
+                from weibo_crawler_core import WeiboStatsStore
+                store = WeiboStatsStore(os.path.join(app_dir(), "DataPC", f"{name}_{uid}"))
+                copied = {wid for wid, rec in store.data["records"].items()
+                          if rec.get("ai_copied")}
+                if copied:
+                    from weibo_ai import AIRunner
+                    runner = AIRunner(None, filter_root=self._resolve_ai_root())
+                    files = runner.scan_files(uid, start, end, self.a_var_format.get())
+                    wids = {
+                        m.group(1) for fp, _fd in files
+                        for m in [re.search(r"_([A-Za-z0-9]+)\.(?:md|docx)$",
+                                            os.path.basename(fp))]
+                        if m
+                    }
+                    pre_count = len(wids & copied)
+                    if pre_count > 0:
+                        if not messagebox.askyesno(
+                                "检测到已实时分类的文章",
+                                f"所选时间段内有 {pre_count} 篇文章已通过"
+                                f"“实时AI总结重命名”复制到 AI分类/高质量。\n\n"
+                                f"默认将跳过它们(避免生成内容相同但标题不同的重复文件);\n"
+                                f"如需重新分类,请先勾选“包含已实时分类的文章”再运行。\n\n"
+                                f"是否继续?"):
+                            return
+                        pre_skipped_ids = sorted(copied & wids)
+            except Exception as e:
+                logger.warning(f"检测已实时分类文章失败(跳过检测): {e}")
+
         self.btn_ai.configure(state="disabled")
         self.btn_start.configure(state="disabled")  # 与爬取互斥
         self.ai_running = True
         self._append_log("=" * 60)
         self._append_log(f"开始AI分类: 博主={name}({uid}), 时间={start} ~ {end}, "
-                         f"格式={self.a_var_format.get()}")
+                         f"格式={self.a_var_format.get()}"
+                         + (f", 跳过{len(pre_skipped_ids)}篇已实时分类" if pre_skipped_ids else ""))
 
         kwargs = {
             "user_name": name,
@@ -1210,6 +1347,8 @@ class WeiboCrawlerGUI:
             "keep_original": self.a_var_keep_original.get(),
             "filter_root": self._resolve_ai_root(),
             "cfg": cfg,
+            "pre_skipped_ids": pre_skipped_ids,
+            "include_pre_copied": self.a_var_include_pre.get(),
         }
         threading.Thread(target=self._run_ai_worker, args=(kwargs,), daemon=True).start()
 
@@ -1235,13 +1374,16 @@ class WeiboCrawlerGUI:
                 keep_source=kwargs.get("keep_source", True),
                 summary_enabled=kwargs["summary_enabled"],
                 keep_original=kwargs.get("keep_original", False),
-                progress_callback=progress_cb, usage_callback=usage_cb)
-            if result["total"] == 0:
+                progress_callback=progress_cb, usage_callback=usage_cb,
+                pre_skipped_ids=kwargs.get("pre_skipped_ids"),
+                include_pre_copied=kwargs.get("include_pre_copied", False))
+            if result["total"] == 0 and not result.get("pre_skipped"):
                 msg = ("\nAI分类未执行: 未找到符合条件的本地文章。\n"
                        "请检查博主/日期范围/数据格式,确认已先爬取数据。")
             else:
                 msg = (f"\nAI分类完成: 共 {result['total']} 篇"
-                       f"(已跳过 {result.get('skipped', 0)} 篇已分类)\n"
+                       f"(已跳过 {result.get('skipped', 0)} 篇已分类"
+                       + (f", {result.get('pre_skipped', 0)} 篇已实时AI分类" if result.get("pre_skipped") else "") + ")\n"
                        f"高质量 {result['high']} | 广告 {result['ad']} | "
                        f"可疑 {result['suspicious']} | 其他低质量 {result['low']} | "
                        f"失败 {result['failed']}\n"
@@ -1267,36 +1409,36 @@ class WeiboCrawlerGUI:
             if kwargs and result.get("total") and kwargs.get("user_id"):
                 self._remember_blogger(kwargs["user_id"], kwargs.get("user_name", ""))
         self._refresh_source_options()
-        messagebox.showinfo("AI分类完成" if result and result["total"] else "AI分类",
-                            msg, parent=self.root)
+        messagebox.showinfo(
+            "AI分类完成" if result and (result.get("total") or result.get("pre_skipped"))
+            else "AI分类", msg, parent=self.root)
+
+    def _scan_blogger_months(self, name, uid):
+        """扫描 DataPC/<博主>_<ID>/ 下已有月份目录,返回 ["<年>年<月>月", ...](升序)"""
+        months = []
+        if name and uid:
+            base = os.path.join(app_dir(), "DataPC", f"{name}_{uid}")
+            if os.path.isdir(base):
+                for year_name in os.listdir(base):
+                    yp = os.path.join(base, year_name)
+                    if not (year_name.endswith("年") and os.path.isdir(yp)):
+                        continue
+                    year = year_name[:-1]
+                    for month_name in os.listdir(yp):
+                        mp = os.path.join(yp, month_name)
+                        if month_name.endswith("月") and os.path.isdir(mp):
+                            try:
+                                months.append((int(year), int(month_name[:-1])))
+                            except ValueError:
+                                pass
+        months.sort()
+        return [f"{y}年{m}月" for y, m in months]
 
     def _load_month_options(self):
         """读取 DataPC 下该博主已有月份目录,刷新筛选页"已有月份"下拉"""
-
-        def _scan():
-            name = self.f_var_name.get().strip()
-            uid = self.f_var_uid.get().strip()
-            months = []
-            if name and uid:
-                base = os.path.join(app_dir(), "DataPC", f"{name}_{uid}")
-                if os.path.isdir(base):
-                    for year_name in os.listdir(base):
-                        yp = os.path.join(base, year_name)
-                        if not (year_name.endswith("年") and os.path.isdir(yp)):
-                            continue
-                        year = year_name[:-1]
-                        for month_name in os.listdir(yp):
-                            mp = os.path.join(yp, month_name)
-                            if month_name.endswith("月") and os.path.isdir(mp):
-                                try:
-                                    months.append((int(year), int(month_name[:-1])))
-                                except ValueError:
-                                    pass
-            months.sort()
-            return [f"{y}年{m}月" for y, m in months]
-
         try:
-            values = _scan()
+            values = self._scan_blogger_months(
+                self.f_var_name.get().strip(), self.f_var_uid.get().strip())
             self.f_month_from_combo.configure(values=values)
             self.f_month_to_combo.configure(values=values)
             cur_from = self.f_var_month_from.get()
@@ -1307,6 +1449,22 @@ class WeiboCrawlerGUI:
                 self.f_var_month_to.set("")
         except Exception as e:
             logger.warning(f"读取已有月份失败: {e}")
+
+    def _load_month_options_ai(self):
+        """读取 DataPC 下该博主已有月份目录,刷新"事后AI分类"页的已有月份下拉"""
+        try:
+            values = self._scan_blogger_months(
+                self.a_var_name.get().strip(), self.a_var_uid.get().strip())
+            self.a_month_from_combo.configure(values=values)
+            self.a_month_to_combo.configure(values=values)
+            cur_from = self.a_var_month_from.get()
+            cur_to = self.a_var_month_to.get()
+            if cur_from not in values:
+                self.a_var_month_from.set("")
+            if cur_to not in values:
+                self.a_var_month_to.set("")
+        except Exception as e:
+            logger.warning(f"读取AI页已有月份失败: {e}")
 
     def _refresh_source_options(self):
         """根据已有 AI 分类文件夹刷新筛选页"数据源"下拉(扫描 筛选/ 与 AI分类/ 两处)
@@ -1773,6 +1931,7 @@ class WeiboCrawlerGUI:
             return
 
         self.running = True
+        self.stop_event.clear()  # 优雅停止:先重置标志
         self.btn_start.configure(state="disabled")
         self.btn_stop.configure(state="normal")
         self.btn_ai.configure(state="disabled")  # 与AI分类互斥
@@ -1829,6 +1988,8 @@ class WeiboCrawlerGUI:
             "ai_config": ai_config,
             "ai_rename": ai_enabled and self.var_ai_rename.get(),
             "ai_copy_media": ai_enabled and self.var_ai_copy_media.get(),
+            "stop_event": self.stop_event,
+            "detected_callback": self._on_class_detected,
             "ai_root": self._resolve_ai_root(),
         }
 
@@ -1857,6 +2018,8 @@ class WeiboCrawlerGUI:
                     f"\nID文件: {result.get('txt_file') or '无'}\n"
                     f"MD目录: {result.get('md_dir') or '无'}"
                 )
+            if result.get("stopped") and not result.get("error"):
+                final_msg = final_msg.replace("任务完成", "任务已停止(部分完成)", 1)
             self.root.after(0, self._on_finish, final_msg, result, kwargs.get("user_id"))
         except Exception as e:
             logger.error(f"任务异常: {e}", exc_info=True)
@@ -2015,18 +2178,214 @@ class WeiboCrawlerGUI:
         if (not is_error and result and uid
                 and result.get("username") and not result.get("error")):
             self._remember_blogger(uid, result["username"])
-        self.lbl_status.configure(text="未完成" if is_error else "完成",
-                                  foreground="red" if is_error else "green")
+        if result and result.get("stopped") and not is_error:
+            self.lbl_status.configure(text="已停止(部分完成)", foreground="orange")
+        else:
+            self.lbl_status.configure(text="未完成" if is_error else "完成",
+                                      foreground="red" if is_error else "green")
         messagebox.showinfo("任务未完成" if is_error else "任务完成", msg)
 
+    def _ask_stats_range(self, name, uid):
+        """弹窗选择"更新转评赞"的月份范围(已有月份从/到,留空=全部)
+
+        实时显示将更新篇数与预计耗时;返回 (start_date, end_date) 或 None(取消)
+        """
+        from weibo_crawler_core import WeiboStatsStore
+        months = self._scan_blogger_months(name, uid)
+        store = WeiboStatsStore(os.path.join(app_dir(), "DataPC", f"{name}_{uid}"))
+        result = {"ok": False, "start": None, "end": None}
+
+        dlg = tk.Toplevel(self.root)
+        dlg.title("更新转评赞 - 选择范围")
+        dlg.transient(self.root)
+        dlg.grab_set()
+        dlg.resizable(False, False)
+
+        frm = ttk.Frame(dlg, padding=14)
+        frm.pack(fill="both", expand=True)
+        ttk.Label(frm, text=f"更新哪个月份的转评赞?({name} · 留空 = 全部已导出)",
+                  font=("", 10, "bold")).grid(row=0, column=0, columnspan=4, sticky="w")
+        ttk.Label(frm, text="   提示:只刷新 转发/评论/点赞 数字,正文与AI分类不动",
+                  foreground="#666").grid(row=1, column=0, columnspan=4, sticky="w", pady=(0, 6))
+
+        ttk.Label(frm, text="从:").grid(row=2, column=0, sticky="e")
+        var_from = tk.StringVar(value="")
+        combof = ttk.Combobox(frm, textvariable=var_from,
+                              values=[""] + months, width=12, state="readonly")
+        combof.grid(row=2, column=1, padx=(4, 14))
+        ttk.Label(frm, text="到:").grid(row=2, column=2, sticky="e")
+        var_to = tk.StringVar(value="")
+        combot = ttk.Combobox(frm, textvariable=var_to,
+                              values=[""] + months, width=12, state="readonly")
+        combot.grid(row=2, column=3, padx=(4, 0))
+
+        info_lbl = ttk.Label(frm, text="", foreground="#1a73e8")
+        info_lbl.grid(row=3, column=0, columnspan=4, sticky="w", pady=(8, 0))
+        est = {"n": 0, "start": None, "end": None}
+
+        def _refresh(_e=None):
+            f = var_from.get()
+            t = var_to.get()
+            start = end = None
+            if f and t:
+                m1 = re.match(r"(\d{4})年(\d{1,2})月", f)
+                m2 = re.match(r"(\d{4})年(\d{1,2})月", t)
+                if months.index(f) > months.index(t):
+                    info_lbl.configure(text="“从”不能晚于“到”,请重新选择", foreground="red")
+                    est["n"] = 0
+                    return
+                start = f"{m1.group(1)}-{int(m1.group(2)):02d}-01"
+                _, end = self._month_range(m2.group(1), f"{int(m2.group(2)):02d}")
+            ids = store.exported_ids_in_range(start, end)
+            n = len(ids)
+            est["n"] = n
+            est["start"] = start
+            est["end"] = end
+            try:
+                per = (int(self.var_min_interval.get() or 3)
+                       + int(self.var_max_interval.get() or 8)) / 2 + 8
+            except ValueError:
+                per = 12
+            mins = max(1, round(n * per / 60))
+            info_lbl.configure(
+                text=f"将更新 {n} 篇 · 预计约 {mins} 分钟(按当前间隔估算)",
+                foreground="#1a73e8")
+        combof.bind("<<ComboboxSelected>>", _refresh)
+        combot.bind("<<ComboboxSelected>>", _refresh)
+        _refresh()
+
+        def _ok():
+            if est["n"] <= 0:
+                messagebox.showwarning("范围为空", "所选范围内没有已导出的文章,请调整范围。",
+                                       parent=dlg)
+                return
+            result["ok"] = True
+            result["start"] = est["start"]
+            result["end"] = est["end"]
+            dlg.destroy()
+
+        btns = ttk.Frame(frm)
+        btns.grid(row=4, column=0, columnspan=4, sticky="e", pady=(12, 0))
+        ttk.Button(btns, text="开始更新", command=_ok).pack(side="left", padx=(0, 8))
+        ttk.Button(btns, text="取消", command=dlg.destroy).pack(side="left")
+
+        self.root.wait_window(dlg)
+        if result["ok"]:
+            return result["start"], result["end"]
+        return None
+
+    def _start_update_stats(self):
+        """更新转评赞: 先选月份范围(弹窗),再按状态记录逐篇抓详情只改数字"""
+        if self.running or self.ai_running or self.stats_running:
+            messagebox.showinfo("任务冲突", "当前有其他任务在运行,请等待其完成后再更新转评赞。")
+            return
+        name = self.var_name.get().strip()
+        uid = self.var_uid.get().strip()
+        if not (name and uid):
+            messagebox.showwarning("参数不完整", "请填写博主昵称和微博ID")
+            return
+        range_sel = self._ask_stats_range(name, uid)
+        if range_sel is None:
+            return
+        start_date, end_date = range_sel
+        try:
+            min_interval = int(self.var_min_interval.get())
+            max_interval = int(self.var_max_interval.get())
+            if min_interval < 1 or max_interval < min_interval:
+                raise ValueError
+        except ValueError:
+            messagebox.showwarning("间隔错误", "请正确填写爬取间隔(最小>=1,最大>=最小)")
+            return
+
+        blogger_dir = os.path.join(app_dir(), "DataPC", f"{name}_{uid}")
+        self.stop_event.clear()
+        self.stats_running = True
+        self.btn_update_stats.configure(state="disabled")
+        self.btn_start.configure(state="disabled")
+        self.btn_ai.configure(state="disabled")
+        self.btn_stop.configure(state="normal")
+        self.lbl_status.configure(text="运行中...", foreground="orange")
+        self._append_log("=" * 60)
+        self._append_log(f"开始更新转评赞: {name}({uid}), "
+                         f"范围={start_date or '全部'} ~ {end_date or '全部'}")
+
+        kwargs = {
+            "user_id": uid,
+            "user_name": name,
+            "blogger_dir": blogger_dir,
+            "headless": self.var_headless.get(),
+            "user_data_dir": self.var_userdata.get().strip() or None,
+            "min_interval": min_interval,
+            "max_interval": max_interval,
+            "keep_browser_open": self.var_keep_browser.get(),
+            "start_date": start_date,
+            "end_date": end_date,
+        }
+        t = threading.Thread(target=self._run_stats_worker, args=(kwargs,), daemon=True)
+        t.start()
+
+    def _run_stats_worker(self, kwargs):
+        try:
+            from weibo_crawler_core import update_stats_for_blogger
+
+            def progress_cb(i, total, wid):
+                logger.info(f"更新转评赞 {i}/{total}: {wid}")
+
+            result = update_stats_for_blogger(
+                kwargs["user_id"], kwargs["user_name"], kwargs["blogger_dir"],
+                headless=kwargs["headless"], user_data_dir=kwargs["user_data_dir"],
+                min_interval=kwargs["min_interval"], max_interval=kwargs["max_interval"],
+                progress_callback=progress_cb, wait_callback=self.wait_callback,
+                stop_event=self.stop_event,
+                keep_browser_open=kwargs.get("keep_browser_open", False),
+                start_date=kwargs.get("start_date"),
+                end_date=kwargs.get("end_date"))
+            if result.get("message"):
+                msg = f"\n{result['message']}"
+            else:
+                stopped = self.stop_event.is_set()
+                rng = (f"{kwargs.get('start_date') or '全部'} ~ "
+                       f"{kwargs.get('end_date') or '全部'}")
+                msg = (f"\n更新转评赞完成({rng}): 成功 {result['updated']} 篇, "
+                       f"失败 {result['failed']} 篇"
+                       + ("\n(已停止,已完成部分)" if stopped else ""))
+            self.root.after(0, self._on_stats_finish, msg)
+        except Exception as e:
+            logger.error(f"更新转评赞异常: {e}", exc_info=True)
+            self.root.after(0, self._on_stats_finish, f"\n更新转评赞异常终止: {e}")
+
+    def _on_stats_finish(self, msg):
+        self._append_log(msg)
+        self.stats_running = False
+        self.btn_update_stats.configure(state="normal")
+        self.btn_start.configure(state="normal")
+        self.btn_ai.configure(state="normal")
+        self.btn_stop.configure(state="disabled")
+        self.lbl_status.configure(text="完成", foreground="green")
+        messagebox.showinfo("更新转评赞", msg)
+
     def _stop(self):
-        if self.running:
-            # 无法安全中止爬虫线程,提示用户
-            messagebox.showinfo(
-                "停止",
-                "当前版本不支持安全中止正在运行的爬虫,请等待当前步骤结束。\n"
-                "如需强制退出,请直接关闭本窗口(浏览器会被释放)。")
-            self.lbl_status.configure(text="提示: 等待当前步骤结束", foreground="red")
+        """优雅停止: 请求后台循环在当前微博处理完后停止(不杀浏览器,干净退出)"""
+        if self.running or self.stats_running:
+            self.stop_event.set()
+            self.btn_stop.configure(state="disabled")
+            self.lbl_status.configure(text="正在停止(当前微博处理完后退出)...",
+                                      foreground="orange")
+            self._append_log("已请求停止:当前微博处理完后将结束任务,浏览器正常释放")
+
+    def _on_class_detected(self, key, value):
+        """修复: 类名由程序自动探测/手动输入而更新时,同步刷新界面输入框与 gui_settings,
+        避免下次启动时又用旧的错误类名覆盖自动识别结果"""
+        def _apply():
+            var = self.class_vars.get(key)
+            if var is not None:
+                var.set(value or "")
+            self._save_settings()
+            self._append_log(f"类名 {key} 已同步为: {value}")
+        try:
+            self.root.after(0, _apply)
+        except Exception:
+            pass
 
     def _on_close(self):
         self._save_window_geometry()  # 记录窗口大小,下次打开沿用
@@ -2038,9 +2397,48 @@ class WeiboCrawlerGUI:
 
 
 def main():
+    # 修复: 单实例锁(系统级文件锁,进程退出自动释放)。
+    # 同时运行多个 GUI 会互相争用同一个用户数据目录并交叉写数据,禁止再启动。
+    lock_f = None
+    try:
+        import msvcrt
+        lock_path = os.path.join(app_dir(), "gui.lock")
+        lock_f = open(lock_path, "w+")
+        try:
+            msvcrt.locking(lock_f.fileno(), msvcrt.LK_NBLCK, 1)
+            lock_f.write(str(os.getpid()))
+            lock_f.flush()
+        except OSError:
+            lock_f.close()
+            lock_f = None
+            already_running = True
+        else:
+            already_running = False
+    except (OSError, ImportError):
+        # 无法创建锁文件(权限/非Windows环境): 不阻止启动
+        lock_f = None
+        already_running = False
+
+    if already_running:
+        try:
+            root = tk.Tk()
+            root.withdraw()
+            messagebox.showwarning(
+                "程序已在运行",
+                "已有一个程序实例在运行(爬取/写数据互斥)。\n"
+                "请先关闭正在运行的程序,再重新启动。")
+        except Exception:
+            pass
+        return
+
     root = tk.Tk()
     app = WeiboCrawlerGUI(root)
     root.mainloop()
+    if lock_f is not None:
+        try:
+            lock_f.close()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
