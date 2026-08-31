@@ -2312,6 +2312,524 @@ def update_stats_for_blogger(user_id, user_name, blogger_dir, headless=False,
 
 
 # ---------------------------------------------------------------------------
+# V0.6.0 导出到笔记库(Obsidian / 通用 Markdown 文件夹)
+# 设计:CONTEXT.md + docs/adr/0001-0002 + 产品设计文档 §10
+# ---------------------------------------------------------------------------
+
+NOTE_ROOT = "微博长文"          # 目标库内笔记根目录
+NOTE_ATTACH_DIR = "附件"        # 位于 NOTE_ROOT 下: 微博长文/附件/<博主>/<年>/<月>/
+NOTE_CSS = """/* 微博长文收集记录整理器 - 笔记样式 */
+/* 启用后:阅读/编辑视图默认隐藏笔记属性面板(需要时 Ctrl+P → Toggle properties 查看) */
+.metadata-container,
+.markdown-reading-view .metadata-container,
+.markdown-preview-view .metadata-container,
+.markdown-source-view .metadata-container {
+    display: none !important;
+}
+"""
+
+# 属性键顺序(英文键 + 中文值;空值字段省略)
+NOTE_ATTRIBUTE_KEYS = (
+    "title", "author", "source_url", "weibo_id", "publish_date",
+    "topics", "category", "quality", "repost", "comment", "like",
+    "imported_at", "tags",
+)
+
+
+def safe_note_title(text, max_len=40):
+    """清洗用于笔记文件名/标题的文本(Windows 非法字符 + 限长)"""
+    return re.sub(r'[\\/:*?"<>|\r\n]+', "", text or "").strip()[:max_len] or "无标题"
+
+
+def publish_to_iso(publish):
+    """任意 publish 格式 -> 'YYYY-MM-DD';无法解析返回 ''"""
+    d = _parse_publish_date(publish)
+    return d.strftime("%Y-%m-%d") if d else ""
+
+
+def _extract_source_md(path):
+    """从源文章 md 解析笔记所需字段;docx 提取正文文本
+
+    返回 dict:url/publish/topics/body/images/videos/repost/comment/like/quality
+    """
+    result = {"url": "", "publish": "", "topics": "", "body": "",
+              "images": [], "videos": [], "repost": None, "comment": None,
+              "like": None, "quality": None, "saved_at": ""}
+    try:
+        if path.endswith(".md"):
+            with open(path, "r", encoding="utf-8") as f:
+                text = f.read()
+            m = re.search(r">URL[：:]\s*\[[^\]]*\]\(([^)]+)\)|>URL[：:]\s*(\S+)", text)
+            if m:
+                result["url"] = m.group(1) or m.group(2) or ""
+            m = re.search(r">发布时间[：:]\s*(\S+\s*\S*)", text)
+            if m:
+                result["publish"] = m.group(1).strip()
+            m = re.search(r">词条[：:]\s*(.+)", text)
+            if m:
+                result["topics"] = m.group(1).strip()
+            m = re.search(r"正文[：:]\s*\n(.*?)\n\s*---", text, re.DOTALL)
+            if m:
+                result["body"] = m.group(1).strip()
+            for label, key in (("转发数", "repost"), ("评论数", "comment"), ("点赞数", "like")):
+                m = re.search(rf">\s*{label}[：:]\s*([\d.,万亿]+)", text)
+                if m:
+                    result[key] = m.group(1)
+            m = re.search(r">高质量可信度[：:]\s*([\d.]+)%?", text)
+            if m:
+                result["quality"] = m.group(1)
+            m = re.search(r">保存时间[：:]\s*(\S+\s*\S*)", text)
+            if m:
+                result["saved_at"] = m.group(1).strip()
+            # 图片行:![图片N](path) → (显示序号, 引用)
+            for m in re.finditer(r"!\[图片\d+\]\(([^)]+)\)", text):
+                result["images"].append(m.group(1).strip())
+            # 视频行:[视频](path) / [视频链接](url)
+            for m in re.finditer(r"\[视频[链接]*\]\(([^)]+)\)", text):
+                result["videos"].append(m.group(1).strip())
+        elif path.endswith(".docx"):
+            from docx import Document
+            doc = Document(path)
+            lines = [p.text.strip() for p in doc.paragraphs]
+            in_body = False
+            parts = []
+            for t in lines:
+                m = re.match(r"^(URL|发布时间|词条)[：:]\s*(.+)$", t)
+                if m:
+                    if m.group(1) == "URL":
+                        result["url"] = m.group(2)
+                    elif m.group(1) == "发布时间":
+                        result["publish"] = m.group(2)
+                    else:
+                        result["topics"] = m.group(2)
+                m2 = re.match(r"^(转发数|评论数|点赞数)[：:]\s*([\d.,万亿]+)$", t)
+                if m2:
+                    key = {"转发数": "repost", "评论数": "comment", "点赞数": "like"}[m2.group(1)]
+                    result[key] = m2.group(2)
+                if t.strip() == "正文：":
+                    in_body = True
+                    continue
+                if in_body and t.startswith("—"):
+                    break
+                if in_body:
+                    parts.append(t)
+            result["body"] = "\n".join(parts).strip()
+    except Exception as e:
+        logger.warning(f"解析源文章失败 {path}: {e}")
+    return result
+
+
+def iter_source_articles(blogger_dir, source="data", start_date=None, end_date=None,
+                         stats_store=None, stop_event=None, author=None,
+                         ai_root=None):
+    """枚举博主源文章(AI分类 或 DataPC)
+
+    source="ai"   : AI分类/AI_<博主>_<类别>/<年>/<月>/*.md|docx,类别取自目录名
+    source="data" : DataPC/<博主>_<ID>/<年>/<月>/<博主>_<日期>_<ID>.md|docx
+    每项 dict: author/weibo_id/publish/publish_date/title/category/quality/
+               ai_title/topics/stats/body/images/videos/source_path
+    """
+    basename = os.path.basename(blogger_dir)
+    # author 缺省时从目录名推导(去掉尾部 _ID)
+    if not author:
+        m = re.match(r"^(.+)_(\d+)$", basename)
+        author = m.group(1) if m else basename
+    start = datetime.strptime(start_date, "%Y-%m-%d") if start_date else None
+    end = datetime.strptime(end_date, "%Y-%m-%d") if end_date else None
+
+    def _in_range(pub_iso):
+        if not pub_iso:
+            return True
+        d = datetime.strptime(pub_iso, "%Y-%m-%d")
+        if start and d < start:
+            return False
+        if end and d > end:
+            return False
+        return True
+
+    def _clean_topics(topics_text):
+        """词条首项并清洗 # 号(用作标题兜底)"""
+        for t in re.split(r"[、，,;；\s]+", topics_text or ""):
+            t = t.strip().strip("#").strip()
+            if t and len(t) <= 40:
+                return t
+        return ""
+
+    def _yield(fpath, category, ai_title, fdate):
+        if stop_event is not None and stop_event.is_set():
+            return
+        meta = _extract_source_md(fpath)
+        pub_iso = publish_to_iso(meta.get("publish") or "") or (
+            fdate.strftime("%Y-%m-%d") if fdate else "")
+        if not _in_range(pub_iso):
+            return
+        wid_m = re.search(r"_([A-Za-z0-9]+)\.(?:md|docx)$", os.path.basename(fpath))
+        weibo_id = wid_m.group(1) if wid_m else ""
+        # 标题优先级: AI标题(分类文件名) > 话题首项 > 无标题
+        title = ai_title or _clean_topics(meta.get("topics") or "") or "无标题"
+        yield {
+            "author": author, "weibo_id": weibo_id,
+            "publish": meta.get("publish") or "", "publish_date": pub_iso,
+            "title": title, "category": category,
+            "quality": meta.get("quality"), "ai_title": ai_title or "",
+            "topics": meta.get("topics") or "", "body": meta.get("body") or "",
+            "images": meta.get("images") or [], "videos": meta.get("videos") or [],
+            "stats": {"repost": meta.get("repost"), "comment": meta.get("comment"),
+                      "like": meta.get("like")},
+            "url": meta.get("url") or "", "saved_at": meta.get("saved_at") or "",
+            "source_path": fpath,
+        }
+
+    if source in ("ai", "ai_high"):
+        # AI 分类目录位于 AI分类/AI_<博主>_<类别>/(与 DataPC 同级,不在 blogger_dir 内)
+        # source="ai_high" = 仅"高质量"类别;source="ai" = 全部类别
+        base = ai_root or os.path.join(app_dir(), "AI分类")
+        if not os.path.isdir(base):
+            logger.warning(f"AI分类目录不存在: {base}")
+            return
+        for cat_name in sorted(os.listdir(base)):
+            if not cat_name.startswith(f"AI_{author}_"):
+                continue
+            category = "AI未分类"
+            for suffix in ("高质量", "广告", "可疑", "其他低质量"):
+                if cat_name.endswith(f"_{suffix}"):
+                    category = suffix
+                    break
+            if category == "AI未分类":
+                continue
+            if source == "ai_high" and category != "高质量":
+                continue
+            cat_dir = os.path.join(base, cat_name)
+            for year_name in sorted(os.listdir(cat_dir)):
+                ypath = os.path.join(cat_dir, year_name)
+                if not (year_name.endswith("年") and os.path.isdir(ypath)):
+                    continue
+                for month_name in sorted(os.listdir(ypath)):
+                    mpath = os.path.join(ypath, month_name)
+                    if not (month_name.endswith("月") and os.path.isdir(mpath)):
+                        continue
+                    for f in sorted(os.listdir(mpath)):
+                        if not f.endswith((".md", ".docx")):
+                            continue
+                        # AI 文件名: 日期_标题 → 标题段
+                        dm = re.match(r"^\d{2,4}-\d{1,2}-\d{1,2}_(.+)\.(?:md|docx)$", f)
+                        ai_title = dm.group(1) if dm else ""
+                        yield from _yield(os.path.join(mpath, f), category,
+                                          ai_title, None)
+    else:
+        for year_name in sorted(os.listdir(blogger_dir)):
+            ypath = os.path.join(blogger_dir, year_name)
+            if not (year_name.endswith("年") and os.path.isdir(ypath)):
+                continue
+            for month_name in sorted(os.listdir(ypath)):
+                mpath = os.path.join(ypath, month_name)
+                if not (month_name.endswith("月") and os.path.isdir(mpath)):
+                    continue
+                for f in sorted(os.listdir(mpath)):
+                    if not f.endswith((".md", ".docx")):
+                        continue
+                    # DataPC 文件名: <博主>_<日期>_<ID>;日期用于兜底
+                    fm = re.search(r"_(\d{1,4})-(\d{1,2})-(\d{1,2})_", f)
+                    fdate = None
+                    if fm:
+                        y = int(fm.group(1))
+                        if y < 100:
+                            y += 2000
+                        try:
+                            fdate = datetime(y, int(fm.group(2)), int(fm.group(3)))
+                        except ValueError:
+                            fdate = None
+                    ai_title = None
+                    if stats_store:
+                        wid_m = re.search(r"_([A-Za-z0-9]+)\.(?:md|docx)$", f)
+                        if wid_m:
+                            rec = stats_store.get(wid_m.group(1)) or {}
+                            ai_title = rec.get("ai_title") or None
+                    yield from _yield(os.path.join(mpath, f), "AI未分类",
+                                      ai_title, fdate)
+
+
+def build_note_markdown(article, imported_at=None, show_meta=True):
+    """渲染笔记 md:13 字段 frontmatter + 正文 + 图片/视频引用
+
+    show_meta=True 时正文前后带关键信息引用块(URL/时间/词条/字数 与 转评赞),
+    与手工导入的旧格式一致;属性(frontmatter)始终保留供机器读取
+    """
+    imported_at = imported_at or _now_str()
+    tags = [article["author"]]
+    if article.get("category") and article["category"] != "AI未分类":
+        tags.append(article["category"])
+    if article.get("publish_date") and len(article["publish_date"]) >= 7:
+        tags.append(article["publish_date"][:7])
+    # 话题标签:去 #、按分隔符与空格拆分、限长、去重
+    for topic in re.split(r"[、，,;；\s]+", article.get("topics") or ""):
+        topic = topic.strip().strip("#").strip()
+        if topic and len(topic) <= 20 and topic not in tags:
+            tags.append(topic)
+
+    attrs = {
+        "title": article.get("title") or "无标题",
+        "author": article.get("author") or "",
+        "source_url": article.get("source_url") or "",
+        "weibo_id": article.get("weibo_id") or "",
+        "publish_date": article.get("publish_date") or "",
+        "topics": article.get("topics") or "",
+        "category": article.get("category") or "",
+        "quality": article.get("quality"),
+        "repost": (article.get("stats") or {}).get("repost"),
+        "comment": (article.get("stats") or {}).get("comment"),
+        "like": (article.get("stats") or {}).get("like"),
+        "imported_at": imported_at,
+        "tags": tags,
+    }
+    lines = ["---"]
+    for key in NOTE_ATTRIBUTE_KEYS:
+        val = attrs.get(key)
+        if val in (None, "", [], {}):
+            continue
+        if key == "tags":
+            rendered = ", ".join(f'"{t}"' for t in val)
+            lines.append(f"tags: [{rendered}]")
+        else:
+            lines.append(f"{key}: {val}")
+    lines.append("---")
+    lines.append("")
+    # 阅读从文件标题 + 关键信息块直接开始;不再加"## 正文"标题(与笔记标题重复)
+    if show_meta:
+        line_meta = []
+        if article.get("url"):
+            line_meta.append(f"URL：{article['url']}")
+        if article.get("publish"):
+            line_meta.append(f"发布时间：{article['publish']}")
+        if article.get("topics"):
+            line_meta.append(f"词条：{article['topics']}")
+        if article.get("body"):
+            line_meta.append(f"正文字数：{len(article['body'])}字符")
+        for lm in line_meta:
+            lines.append(f"> {lm}")
+        if line_meta:
+            lines.append("")
+    lines.append(article.get("body") or "")
+    if show_meta:
+        stats = article.get("stats") or {}
+        line_stats = []
+        if stats.get("like") is not None:
+            line_stats.append(f"点赞数：{stats['like']}")
+        if stats.get("comment") is not None:
+            line_stats.append(f"评论数：{stats['comment']}")
+        if stats.get("repost") is not None:
+            line_stats.append(f"转发数：{stats['repost']}")
+        if article.get("saved_at"):
+            line_stats.append(f"保存时间：{article['saved_at']}")
+        if article.get("quality") is not None:
+            line_stats.append(f"高质量可信度：{article['quality']}%")
+        if line_stats:
+            lines.append("")
+            lines.append("---")
+            lines.append("")
+            for ls in line_stats:
+                lines.append(f"> {ls}")
+    if article.get("images"):
+        lines.append("")
+        lines.append("### 图片")
+        for ref in article["images"]:
+            lines.append(f"![图片]({ref})")
+    if article.get("videos"):
+        lines.append("")
+        lines.append("### 视频")
+        for ref in article["videos"]:
+            lines.append(f"[视频]({ref})")
+    return "\n".join(lines)
+
+
+def scan_target_notes(target_root, author):
+    """扫描目标库 微博长文/<author> 下所有笔记,解析 (weibo_id, publish_date) 幂等键
+
+    返回 {(weibo_id, publish_date): note_path}(支持笔记被改名/移动)
+    """
+    base = os.path.join(target_root, NOTE_ROOT, author)
+    found = {}
+    if not os.path.isdir(base):
+        return found
+    for year_name in sorted(os.listdir(base)):
+        ypath = os.path.join(base, year_name)
+        if not (year_name.endswith("年") and os.path.isdir(ypath)):
+            continue
+        for month_name in sorted(os.listdir(ypath)):
+            mpath = os.path.join(ypath, month_name)
+            if not (month_name.endswith("月") and os.path.isdir(mpath)):
+                continue
+            for f in sorted(os.listdir(mpath)):
+                if not f.endswith(".md"):
+                    continue
+                fp = os.path.join(mpath, f)
+                wid = pub = ""
+                try:
+                    with open(fp, "r", encoding="utf-8") as fh:
+                        head = fh.read(2000)
+                except Exception:
+                    continue
+                m = re.search(r"^weibo_id:\s*(\S+)$", head, re.M)
+                if m:
+                    wid = m.group(1)
+                m = re.search(r"^publish_date:\s*(\S+)$", head, re.M)
+                if m:
+                    pub = m.group(1)
+                if wid and pub:
+                    found[(wid, pub)] = fp
+    return found
+
+
+def _resolve_note_image(ref, note_dir, attachment_dir, copy_images):
+    """图片引用 -> 目标笔记内可用引用(URL 原样;本地文件复制到附件并改相对路径)"""
+    if re.match(r"^https?://", ref):
+        return ref, None
+    src = os.path.abspath(ref)
+    if not os.path.exists(src):
+        return ref, None  # 本地文件缺失:保持原引用
+    if not copy_images:
+        return ref, None
+    dst = os.path.join(attachment_dir, os.path.basename(src))
+    try:
+        if os.path.abspath(src) != os.path.abspath(dst):
+            os.makedirs(attachment_dir, exist_ok=True)
+            shutil.copy2(src, dst)
+        return os.path.relpath(dst, note_dir).replace("\\", "/"), None
+    except Exception as e:
+        logger.warning(f"复制附件失败 {src}: {e}")
+        return ref, None
+
+
+def export_notes_for_blogger(user_name, user_id, blogger_dir, target_root,
+                             source="ai", target="obsidian",
+                             start_date=None, end_date=None,
+                             copy_images=True, conflict="skip",
+                             overwrite=False, progress_callback=None,
+                             stop_event=None, ai_root=None, write_css=True,
+                             show_meta=True):
+    """把博主源文章导入目标笔记库(V0.6.0 导出主流程)
+
+    参数:
+      blogger_dir   DataPC/<博主>_<ID>(同时用于读取状态与定位 AI分类 同级约定)
+      target_root   vault 或通用笔记库根目录
+      source        "ai"=仅AI分类结果 | "data"=全部已导出
+      target        "obsidian" | "markdown-folder"(栈中仅作标记;open 动作由上层处理)
+      conflict      "skip" | "rename"(同名不同源:跳过或加后缀)
+      overwrite     同源已存在时是否覆盖(默认 False 跳过)
+    返回 {"imported": [...], "updated": n, "skipped": n, "conflicts": [...],
+          "failed": [...], "planned": n}
+    """
+    ensure_logger()
+    target_root = os.path.abspath(target_root)
+    author = (user_name or "").strip() or os.path.basename(blogger_dir)
+    stats_store = WeiboStatsStore(blogger_dir) if os.path.isdir(blogger_dir) else None
+
+    # 幂等扫描:该博主已存在的笔记(可能是被改名/移动过的)
+    existing = scan_target_notes(target_root, author)
+
+    imported, conflicts, failed = [], [], []
+    updated_n = skipped_n = 0
+    total_planned = 0
+
+    for article in iter_source_articles(blogger_dir, source=source,
+                                        start_date=start_date, end_date=end_date,
+                                        stats_store=stats_store,
+                                        stop_event=stop_event,
+                                        author=author, ai_root=ai_root):
+        if stop_event is not None and stop_event.is_set():
+            logger.info("收到停止请求,导出停止")
+            break
+        total_planned += 1
+        if progress_callback:
+            progress_callback(total_planned, 0, article.get("weibo_id") or "")
+        key = (article.get("weibo_id") or "", article.get("publish_date") or "")
+        if key in existing and not overwrite:
+            skipped_n += 1
+            continue
+
+        # 目标路径: 微博长文/<author>/<年>/<月>/yy-m-d_标题.md
+        pub = article.get("publish_date") or ""
+        if len(pub) < 10:
+            pub = datetime.now().strftime("%Y-%m-%d")
+        note_dir = os.path.join(target_root, NOTE_ROOT, author,
+                                f"{pub[:4]}年", f"{int(pub[5:7])}月")
+        # 附件: 微博长文/附件/<author>/<年>/<月>/(与笔记同库同体系)
+        note_attach = os.path.join(target_root, NOTE_ROOT, NOTE_ATTACH_DIR,
+                                   author, f"{pub[:4]}年", f"{int(pub[5:7])}月")
+        # 文件名与用户手工导入风格一致: 26-2-1_标题.md(两位年,月日不补零)
+        short_date = f"{int(pub[2:4])}-{int(pub[5:7])}-{int(pub[8:10])}"
+        stem = f"{short_date}_{safe_note_title(article.get('title'))}"
+        filename = f"{stem}.md"
+        note_path = os.path.join(note_dir, filename)
+        if os.path.exists(note_path) and key not in existing:
+            # 同名但不同源:按策略处理
+            if conflict == "rename":
+                n = 2
+                while os.path.exists(os.path.join(note_dir, f"{stem}_{n}.md")):
+                    n += 1
+                note_path = os.path.join(note_dir, f"{stem}_{n}.md")
+            else:
+                conflicts.append(os.path.basename(article.get("source_path") or filename))
+                continue
+
+        try:
+            os.makedirs(note_dir, exist_ok=True)
+            # 源 md 中图片为相对源文章目录的路径 → 转绝对再解析
+            abs_images = []
+            for ref in article.get("images") or []:
+                if re.match(r"^https?://", ref):
+                    abs_images.append(ref)
+                else:
+                    abs_images.append(os.path.join(
+                        os.path.dirname(article["source_path"]), ref))
+            article["images"] = abs_images
+            md_text = build_note_markdown(article, show_meta=show_meta)
+            for ref in list(article.get("images") or []):
+                new_ref, _ = _resolve_note_image(ref, note_dir, note_attach,
+                                                 copy_images)
+                md_text = md_text.replace(f"![图片]({ref})", f"![图片]({new_ref})", 1)
+            with open(note_path, "w", encoding="utf-8") as f:
+                f.write(md_text)
+            if key in existing:
+                updated_n += 1
+            else:
+                imported.append(os.path.relpath(note_path, target_root))
+            # 状态记录标记"上次导入时间"(仅展示;幂等依据是目标笔记 frontmatter)
+            if stats_store and article.get("weibo_id"):
+                stats_store.set_record(article["weibo_id"],
+                                       obsidian_imported_at=_now_str())
+        except Exception as e:
+            logger.warning(f"导出笔记失败 {article.get('source_path')}: {e}")
+            failed.append(os.path.basename(article.get("source_path") or ""))
+
+    return {"imported": imported, "updated": updated_n, "skipped": skipped_n,
+            "conflicts": conflicts, "failed": failed,
+            "planned": total_planned, "css_hint": _write_css_snippet(
+                target_root, target, write_css)}
+
+
+def _write_css_snippet(target_root, target, write_css):
+    """向 vault 写入隐藏属性的 CSS 片段(仅 obsidian 目标;失败不影响导入)
+
+    返回提示文本(空=未写入/失败)
+    """
+    if not write_css or target != "obsidian":
+        return ""
+    try:
+        snippets = os.path.join(target_root, ".obsidian", "snippets")
+        os.makedirs(snippets, exist_ok=True)
+        with open(os.path.join(snippets, "weibo-notes.css"), "w",
+                  encoding="utf-8") as f:
+            f.write(NOTE_CSS)
+        return ("\n提示:已写入 weibo-notes.css;如需阅读视图默认隐藏属性面板:"
+                "Obsidian 设置→外观→CSS 片段→启用 weibo-notes"
+                "(Ctrl+P → Toggle properties 可随时查看)")
+    except Exception as e:
+        logger.warning(f"写入CSS片段失败: {e}")
+        return ""
+
+
+# ---------------------------------------------------------------------------
 # 一键任务:收集 + 导出
 # ---------------------------------------------------------------------------
 

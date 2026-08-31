@@ -123,7 +123,7 @@ class LogQueueHandler(logging.Handler):
 class WeiboCrawlerGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("微博长文收集记录整理器 v0.5.2")
+        self.root.title("微博长文收集记录整理器 v0.6.0")
         self.root.geometry("900x760")
         self.root.minsize(840, 680)
 
@@ -138,6 +138,7 @@ class WeiboCrawlerGUI:
         self.running = False      # 爬取任务运行中
         self.ai_running = False   # AI分类任务运行中(与爬取互斥)
         self.stats_running = False  # 更新转评赞运行中(与爬取/AI互斥)
+        self.export_running = False  # 导出到笔记库运行中
         self.stop_event = threading.Event()  # 优雅停止:后台爬取循环检查该标志
         self.settings = self._load_settings()
 
@@ -260,6 +261,22 @@ class WeiboCrawlerGUI:
                 "a_keep_original": self.a_var_keep_original.get(),
                 "a_include_pre": self.a_var_include_pre.get(),
             })
+        # 导出页设置
+        if hasattr(self, "e_var_name"):
+            data.update({
+                "e_name": self.e_var_name.get(),
+                "e_uid": self.e_var_uid.get(),
+                "e_month_from": self.e_var_month_from.get(),
+                "e_month_to": self.e_var_month_to.get(),
+                "e_source": self.e_var_source.get(),
+                "e_target": self.e_var_target.get(),
+                "e_root": self.e_var_root.get(),
+                "e_copy_images": self.e_var_copy_images.get(),
+                "e_conflict": self.e_var_conflict.get(),
+                "e_css": self.e_var_css.get(),
+                "e_overwrite": self.e_var_overwrite.get(),
+                "e_meta": self.e_var_meta.get(),
+            })
         # 类名覆盖
         for key, var in self.class_vars.items():
             data[f"class_{key}"] = var.get()
@@ -331,6 +348,20 @@ class WeiboCrawlerGUI:
             self.a_var_keep_source.set(bool(st.get("a_keep_source", True)))
             self.a_var_keep_original.set(bool(st.get("a_keep_original", False)))
             self.a_var_include_pre.set(bool(st.get("a_include_pre", False)))
+        # 导出页设置恢复
+        if hasattr(self, "e_var_name"):
+            self.e_var_name.set(st.get("e_name", self.e_var_name.get()))
+            self.e_var_uid.set(st.get("e_uid", self.e_var_uid.get()))
+            self.e_var_month_from.set(st.get("e_month_from", ""))
+            self.e_var_month_to.set(st.get("e_month_to", ""))
+            self.e_var_source.set(st.get("e_source", "ai_high"))
+            self.e_var_target.set(st.get("e_target", "obsidian"))
+            self.e_var_root.set(st.get("e_root", ""))
+            self.e_var_copy_images.set(bool(st.get("e_copy_images", True)))
+            self.e_var_conflict.set(st.get("e_conflict", "跳过"))
+            self.e_var_css.set(bool(st.get("e_css", True)))
+            self.e_var_overwrite.set(bool(st.get("e_overwrite", False)))
+            self.e_var_meta.set(bool(st.get("e_meta", True)))
         for key, var in self.class_vars.items():
             val = st.get(f"class_{key}", "")
             if val:
@@ -447,16 +478,18 @@ class WeiboCrawlerGUI:
     def _build_ui(self):
         pad = {"padx": 8, "pady": 4}
 
-        # 主容器: Notebook 三页签(爬取 / 数据筛选 / AI分类)
+        # 主容器: Notebook 四页签(爬取 / 数据筛选 / AI分类 / 导出)
         self.notebook = ttk.Notebook(self.root)
         self.notebook.pack(fill="both", expand=True, padx=10, pady=(10, 0))
 
         self.tab_crawl = ttk.Frame(self.notebook)
         self.tab_filter = ttk.Frame(self.notebook)
         self.tab_ai = ttk.Frame(self.notebook)
+        self.tab_export = ttk.Frame(self.notebook)
         self.notebook.add(self.tab_crawl, text="  爬取  ")
         self.notebook.add(self.tab_filter, text="  数据筛选  ")
         self.notebook.add(self.tab_ai, text="  AI分类  ")
+        self.notebook.add(self.tab_export, text="  导出  ")
 
         # ============ 页签1: 爬取 ============
         t = self.tab_crawl
@@ -500,7 +533,11 @@ class WeiboCrawlerGUI:
                        self.var_name.get(), self.var_uid.get(),
                        self.var_start_year, self.var_start_month)
                    ).pack(side="left", padx=(10, 0))
-        self._hint_icon(row2, "年份可手动输入(10年前~明年);切换月份自动调整日期选项",
+        ttk.Button(row2, text="导出到笔记库",
+                   command=lambda: self._goto_export_tab(source="data")
+                   ).pack(side="left", padx=8)
+        self._hint_icon(row2, "年份可手动输入(10年前~明年);切换月份自动调整日期选项;"
+                        "“导出到笔记库”跳到导出页签并预填该博主全部文章",
                         pack=dict(side="left", padx=4))
 
         # 日期行下方的建议提示小字
@@ -813,6 +850,9 @@ class WeiboCrawlerGUI:
                         variable=self.f_var_auto_open).pack(side="left")
         ttk.Button(frow5, text="打开当前筛选任务文件夹",
                    command=self._open_current_filter_dir).pack(side="left", padx=10)
+        ttk.Button(frow5, text="导出到笔记库",
+                   command=lambda: self._goto_export_tab(source="data")
+                   ).pack(side="left", padx=8)
 
         frame_fbtn = ttk.Frame(f)
         frame_fbtn.pack(fill="x", padx=10, pady=8)
@@ -824,7 +864,10 @@ class WeiboCrawlerGUI:
         # ============ 页签3: AI筛选 ============
         self._build_ai_tab()
 
-        # ============ 日志区(三个页签共用) ============
+        # ============ 页签4: 导出(Obsidian / 通用 Markdown 文件夹) ============
+        self._build_export_tab()
+
+        # ============ 日志区(四个页签共用) ============
         frame_log = ttk.LabelFrame(self.root, text="运行日志", padding=6)
         frame_log.pack(fill="both", expand=True, padx=10, pady=(0, 10))
         log_btns = ttk.Frame(frame_log)
@@ -835,10 +878,13 @@ class WeiboCrawlerGUI:
                                           command=self._open_filter_root_dir)
         self.btn_open_ai = ttk.Button(log_btns, text="打开AI分类目录",
                                       command=self._open_ai_root_dir)
+        self.btn_export_notes = ttk.Button(log_btns, text="导出到笔记库",
+                                           command=self._goto_export_tab)
         self.btn_export_log = ttk.Button(log_btns, text="导出日志",
                                          command=self._export_log)
         for i, btn in enumerate((self.btn_open_data, self.btn_open_filter,
-                                 self.btn_open_ai, self.btn_export_log)):
+                                 self.btn_open_ai, self.btn_export_notes,
+                                 self.btn_export_log)):
             btn.pack(side="top", fill="x", pady=1)
         self.txt_log = scrolledtext.ScrolledText(frame_log, height=14, state="disabled", wrap="word")
         self.txt_log.pack(fill="both", expand=True)
@@ -1107,6 +1153,9 @@ class WeiboCrawlerGUI:
         self.btn_ai_open = ttk.Button(run_row4, text="打开输出文件夹",
                                       command=self._a_open_output_dir)
         self.btn_ai_open.pack(side="left", padx=6)
+        ttk.Button(run_row4, text="导出到笔记库",
+                   command=lambda: self._goto_export_tab(source="ai_high")
+                   ).pack(side="left", padx=8)
 
         run_row5 = ttk.Frame(frame_run)
         run_row5.pack(fill="x", pady=(4, 0))
@@ -2364,9 +2413,341 @@ class WeiboCrawlerGUI:
         self.lbl_status.configure(text="完成", foreground="green")
         messagebox.showinfo("更新转评赞", msg)
 
+    # ---------- 导出页签(V0.6.0 Obsidian / 通用 Markdown 文件夹) ----------
+
+    def _vault_suggestions(self):
+        """读取本机 Obsidian 已知 vault(返回 [{"id","name","path"}];无则空)"""
+        try:
+            p = os.path.join(os.environ.get("APPDATA", ""), "obsidian", "obsidian.json")
+            if os.path.isfile(p):
+                with open(p, "r", encoding="utf-8") as f:
+                    d = json.load(f)
+                out = []
+                for vid, v in (d.get("vaults") or {}).items():
+                    if isinstance(v, dict) and v.get("path"):
+                        out.append({"id": vid, "name": os.path.basename(v["path"]),
+                                    "path": v["path"]})
+                return out
+        except Exception:
+            pass
+        return []
+
+    def _build_export_tab(self):
+        t = self.tab_export
+        frame1 = ttk.LabelFrame(t, text="博主与范围", padding=10)
+        frame1.pack(fill="x", padx=10, pady=(10, 4))
+        row1 = ttk.Frame(frame1)
+        row1.pack(fill="x")
+        ttk.Label(row1, text="博主昵称:").pack(side="left")
+        self.e_var_name = tk.StringVar(value="")
+        self.e_name_combo = ttk.Combobox(row1, textvariable=self.e_var_name, width=16)
+        self.e_name_combo.pack(side="left", padx=(4, 8))
+        ttk.Label(row1, text="微博ID:").pack(side="left")
+        self.e_var_uid = tk.StringVar(value="")
+        ttk.Entry(row1, textvariable=self.e_var_uid, width=16).pack(side="left", padx=4)
+        ttk.Button(row1, text="打开博主记录", command=self._open_blogger_record).pack(
+            side="left", padx=(8, 2))
+        ttk.Button(row1, text="刷新", command=lambda: self._reload_blogger_names(
+            self.e_name_combo, self.e_var_uid, self.e_var_name)).pack(side="left")
+        self._load_blogger_names(self.e_name_combo, self.e_var_uid, self.e_var_name)
+
+        row2 = ttk.Frame(frame1)
+        row2.pack(fill="x", pady=(6, 0))
+        ttk.Label(row2, text="已有月份:").pack(side="left")
+        ttk.Label(row2, text="从").pack(side="left", padx=(4, 0))
+        self.e_var_month_from = tk.StringVar(value="")
+        self.e_month_from_combo = ttk.Combobox(row2, textvariable=self.e_var_month_from,
+                                               width=10, state="readonly")
+        self.e_month_from_combo.pack(side="left", padx=2)
+        ttk.Label(row2, text="到").pack(side="left")
+        self.e_var_month_to = tk.StringVar(value="")
+        self.e_month_to_combo = ttk.Combobox(row2, textvariable=self.e_var_month_to,
+                                             width=10, state="readonly")
+        self.e_month_to_combo.pack(side="left", padx=2)
+        ttk.Button(row2, text="刷新月份", command=self._load_export_months).pack(
+            side="left", padx=6)
+        self._hint_icon(row2, "留空 = 该博主全部文章", pack=dict(side="left", padx=4))
+        self.e_var_uid.trace_add("write", lambda *a: self._load_export_months())
+
+        frame2 = ttk.LabelFrame(t, text="目标与选项", padding=10)
+        frame2.pack(fill="x", padx=10, pady=4)
+        row3 = ttk.Frame(frame2)
+        row3.pack(fill="x")
+        ttk.Label(row3, text="来源:").pack(side="left")
+        self.e_var_source = tk.StringVar(value="ai_high")
+        ttk.Radiobutton(row3, text="仅AI高质量(推荐)", variable=self.e_var_source,
+                        value="ai_high").pack(side="left")
+        ttk.Radiobutton(row3, text="AI分类全部", variable=self.e_var_source,
+                        value="ai").pack(side="left", padx=(8, 0))
+        ttk.Radiobutton(row3, text="全部已导出", variable=self.e_var_source,
+                        value="data").pack(side="left", padx=(8, 0))
+        ttk.Label(row3, text="  目标:").pack(side="left", padx=(16, 0))
+        self.e_var_target = tk.StringVar(value="obsidian")
+        ttk.Combobox(row3, textvariable=self.e_var_target,
+                     values=["obsidian", "markdown-folder"], width=14,
+                     state="readonly").pack(side="left")
+        self._hint_icon(row3, "obsidian=写入vault,完成后可用obsidian://定位;"
+                        "markdown-folder=任意目录(通用,Logseq等也能读)",
+                        pack=dict(side="left", padx=4))
+
+        row4 = ttk.Frame(frame2)
+        row4.pack(fill="x", pady=(6, 0))
+        ttk.Label(row4, text="目标目录:").pack(side="left")
+        self.e_var_root = tk.StringVar(value="")
+        self.e_root_combo = ttk.Combobox(row4, textvariable=self.e_var_root, width=52)
+        self.e_root_combo.pack(side="left", padx=4)
+        ttk.Button(row4, text="浏览...", command=self._browse_export_root).pack(side="left")
+        ttk.Button(row4, text="选vault", command=self._pick_vault).pack(side="left", padx=(8, 0))
+        self._hint_icon(row4, "填 Obsidian 知识库根目录,或任意 Markdown 文件夹",
+                        pack=dict(side="left", padx=4))
+
+        row5 = ttk.Frame(frame2)
+        row5.pack(fill="x", pady=(6, 0))
+        self.e_var_copy_images = tk.BooleanVar(value=True)
+        ttk.Checkbutton(row5, text="复制配图到附件目录(推荐;取消则引用网络链接)",
+                        variable=self.e_var_copy_images).pack(side="left")
+        ttk.Label(row5, text="  同名不同源:").pack(side="left", padx=(16, 0))
+        self.e_var_conflict = tk.StringVar(value="跳过")
+        ttk.Combobox(row5, textvariable=self.e_var_conflict,
+                     values=["跳过", "另存加后缀"], width=10,
+                     state="readonly").pack(side="left")
+        self._hint_icon(row5, "同名不同源:目标目录已有同名笔记但微博ID不同(标题重复)",
+                        pack=dict(side="left", padx=4))
+        self.e_var_css = tk.BooleanVar(value=True)
+        ttk.Checkbutton(row5, text="写入CSS隐藏属性(推荐)",
+                        variable=self.e_var_css).pack(side="left", padx=(16, 0))
+        self._hint_icon(row5, "obsidian 目标时写入 .obsidian/snippets/weibo-notes.css;"
+                        "在 Obsidian 设置→外观→CSS片段启用后,阅读视图默认隐藏属性面板"
+                        "(Ctrl+P → Toggle properties 随时查看)",
+                        pack=dict(side="left", padx=4))
+
+        # 修复: 选项过多,拆两行
+        row5b = ttk.Frame(frame2)
+        row5b.pack(fill="x", pady=(6, 0))
+        self.e_var_overwrite = tk.BooleanVar(value=False)
+        ttk.Checkbutton(row5b, text="覆盖已存在笔记(默认关)",
+                        variable=self.e_var_overwrite).pack(side="left")
+        self._hint_icon(row5b, "勾选后,已导入过的笔记(同源)内容与属性会被覆盖刷新;"
+                        "关闭=跳过,保护你在 Obsidian 里的手工修改",
+                        pack=dict(side="left", padx=4))
+        self.e_var_meta = tk.BooleanVar(value=True)
+        ttk.Checkbutton(row5b, text="显示关键信息(推荐)",
+                        variable=self.e_var_meta).pack(side="left", padx=(16, 0))
+        self._hint_icon(row5b, "正文前后显示 URL/发布时间/词条/正文字数 与 "
+                        "转评赞/保存时间引用块,方便读时回原文、看热度;"
+                        "取消则只有干净正文(属性面板仍保留全部信息)",
+                        pack=dict(side="left", padx=4))
+
+        # 落位说明两行,避免单行过长
+        ttk.Label(frame2, text="落位:目标目录/微博长文/<博主>/<年>/<月>/yy-m-d_标题.md"
+                              " (文件名即标题,属性含作者/来源/ID/日期/类别/转评赞/标签)",
+                  foreground="#666").pack(anchor="w", pady=(8, 0))
+        ttk.Label(frame2, text="配图复制到:目标目录/微博长文/附件/<博主>/<年>/<月>/",
+                  foreground="#666").pack(anchor="w")
+
+        frame3 = ttk.Frame(t)
+        frame3.pack(fill="x", padx=10, pady=8)
+        self.btn_export = ttk.Button(frame3, text="开始导入", command=self._start_export)
+        self.btn_export.pack(side="left")
+        self.btn_export_stop = ttk.Button(frame3, text="停止", command=self._stop,
+                                          state="disabled")
+        self.btn_export_stop.pack(side="left", padx=8)
+        self.lbl_export_status = ttk.Label(frame3, text="", foreground="green")
+        self.lbl_export_status.pack(side="left", padx=12)
+        self._hint(t, " 说明:把源文章渲染为带属性头的笔记写入目标库;已导入过的笔记不会重复创建"
+                      "(改过文件名也能识别);配图可复制到 微博长文/附件/ 下按博主年月归类",
+                   own=True)
+
+    def _load_export_months(self):
+        try:
+            values = self._scan_blogger_months(self.e_var_name.get().strip(),
+                                               self.e_var_uid.get().strip())
+            self.e_month_from_combo.configure(values=values)
+            self.e_month_to_combo.configure(values=values)
+            if self.e_var_month_from.get() not in values:
+                self.e_var_month_from.set("")
+            if self.e_var_month_to.get() not in values:
+                self.e_var_month_to.set("")
+        except Exception as e:
+            logger.warning(f"读取导出页已有月份失败: {e}")
+
+    def _browse_export_root(self):
+        d = filedialog.askdirectory(title="选择目标笔记库目录",
+                                    initialdir=self.e_var_root.get() or None)
+        if d:
+            self.e_var_root.set(d)
+
+    def _pick_vault(self):
+        vaults = self._vault_suggestions()
+        if not vaults:
+            messagebox.showinfo("未发现 vault",
+                                "未在默认位置找到 Obsidian 配置,请手动浏览选择。\n"
+                                "(也可使用任意 Markdown 文件夹作为目标)",
+                                parent=self.root)
+            self._browse_export_root()
+            return
+        import tkinter.simpledialog as _sd
+        sel = _sd.askstring(
+            "选择 vault",
+            "检测到以下 Obsidian 知识库(输入序号或直接粘贴路径):\n\n" +
+            "\n".join(f"{i + 1}. {v['path']}" for i, v in enumerate(vaults)),
+            parent=self.root)
+        if not sel:
+            return
+        sel = sel.strip()
+        if sel.isdigit() and 1 <= int(sel) <= len(vaults):
+            self.e_var_root.set(vaults[int(sel) - 1]["path"])
+        else:
+            self.e_var_root.set(sel)
+
+    def _goto_export_tab(self, source=None):
+        """快捷按钮:跳到导出页签并预填上下文"""
+        if source:
+            self.e_var_source.set(source)
+        self._load_export_months()
+        self.notebook.select(self.tab_export)
+
+    def _start_export(self):
+        """导出:预扫描(新增/已存在) -> 确认 -> 后台线程"""
+        if self.running or self.ai_running or self.stats_running or self.export_running:
+            messagebox.showinfo("任务冲突", "当前有其他任务在运行,请等待其完成后再导出。")
+            return
+        name = self.e_var_name.get().strip()
+        uid = self.e_var_uid.get().strip()
+        target_root = self.e_var_root.get().strip()
+        if not (name and uid):
+            messagebox.showwarning("参数不完整", "请填写博主昵称和微博ID")
+            return
+        if not target_root:
+            messagebox.showwarning("缺少目标目录", "请先选择目标笔记库目录(vault 或通用文件夹)")
+            return
+        if not os.path.isdir(target_root):
+            if not messagebox.askyesno("目录不存在",
+                                       f"目标目录不存在:\n{target_root}\n\n是否创建并继续?"):
+                return
+            try:
+                os.makedirs(target_root, exist_ok=True)
+            except Exception as e:
+                messagebox.showerror("无法创建目录", str(e))
+                return
+
+        start = end = None
+        f = self.e_var_month_from.get()
+        t = self.e_var_month_to.get()
+        if f and t:
+            m1 = re.match(r"(\d{4})年(\d{1,2})月", f)
+            m2 = re.match(r"(\d{4})年(\d{1,2})月", t)
+            if m1 and m2:
+                if int(m1.group(1)) * 12 + int(m1.group(2)) > int(m2.group(1)) * 12 + int(m2.group(2)):
+                    messagebox.showwarning("范围错误", "“从”不能晚于“到”")
+                    return
+                start = f"{m1.group(1)}-{int(m1.group(2)):02d}-01"
+                _, end = self._month_range(m2.group(1), f"{int(m2.group(2)):02d}")
+
+        # 预扫描(只读,不写入)
+        from weibo_crawler_core import (iter_source_articles, scan_target_notes,
+                                        WeiboStatsStore)
+        blogger_dir = os.path.join(app_dir(), "DataPC", f"{name}_{uid}")
+        try:
+            stats_store = WeiboStatsStore(blogger_dir) if os.path.isdir(blogger_dir) else None
+            existing = scan_target_notes(target_root, name)
+            planned = 0
+            new_n = 0
+            for art in iter_source_articles(blogger_dir, source=self.e_var_source.get(),
+                                            start_date=start, end_date=end,
+                                            stats_store=stats_store, author=name,
+                                            ai_root=self._resolve_ai_root()):
+                planned += 1
+                if (art.get("weibo_id") or "", art.get("publish_date") or "") not in existing:
+                    new_n += 1
+            if planned == 0:
+                messagebox.showinfo("无内容", "所选范围内没有符合来源的文章,请调整范围/来源。")
+                return
+            scope = f"{start or '全部'} ~ {end or '全部'}"
+            if not messagebox.askyesno(
+                    "确认导入",
+                    f"博主: {name}({uid})\n范围: {scope}\n来源: "
+                    f"{'AI分类结果' if self.e_var_source.get() == 'ai' else '全部已导出'}\n\n"
+                    f"将新增 {new_n} 篇, 已存在跳过 {planned - new_n} 篇\n是否开始?"):
+                return
+        except Exception as e:
+            messagebox.showerror("预扫描失败", f"预扫描出错:\n{e}")
+            return
+
+        self.export_running = True
+        self.stop_event.clear()
+        # 记住导出页设置(博主/范围/来源/目标等),重启后保留
+        self._save_settings()
+        self.btn_export.configure(state="disabled")
+        self.btn_export_stop.configure(state="normal")
+        self.btn_start.configure(state="disabled")
+        self.btn_ai.configure(state="disabled")
+        self.lbl_export_status.configure(text="运行中...", foreground="orange")
+        self._append_log("=" * 60)
+        self._append_log(f"开始导入到笔记库: {name}({uid}), 范围={scope}, "
+                         f"目标={target_root}, 来源={self.e_var_source.get()}")
+
+        kwargs = {"user_name": name, "user_id": uid, "blogger_dir": blogger_dir,
+                  "target_root": target_root, "source": self.e_var_source.get(),
+                  "target": self.e_var_target.get(), "start_date": start, "end_date": end,
+                  "copy_images": self.e_var_copy_images.get(),
+                  "conflict": "rename" if self.e_var_conflict.get() == "另存加后缀" else "skip",
+                  "write_css": self.e_var_css.get(),
+                  "overwrite": self.e_var_overwrite.get(),
+                  "show_meta": self.e_var_meta.get(),
+                  "ai_root": self._resolve_ai_root()}
+        threading.Thread(target=self._run_export_worker, args=(kwargs,), daemon=True).start()
+
+    def _run_export_worker(self, kwargs):
+        try:
+            from weibo_crawler_core import export_notes_for_blogger
+
+            def progress_cb(i, _t, wid):
+                if i % 20 == 0:
+                    logger.info(f"导出进度: 已处理 {i} 篇 ({wid})")
+
+            result = export_notes_for_blogger(
+                kwargs["user_name"], kwargs["user_id"], kwargs["blogger_dir"],
+                kwargs["target_root"], source=kwargs["source"], target=kwargs["target"],
+                start_date=kwargs["start_date"], end_date=kwargs["end_date"],
+                copy_images=kwargs["copy_images"], conflict=kwargs["conflict"],
+                progress_callback=progress_cb, stop_event=self.stop_event,
+                ai_root=kwargs["ai_root"], write_css=kwargs.get("write_css", True),
+                overwrite=kwargs.get("overwrite", False),
+                show_meta=kwargs.get("show_meta", True))
+            if self.stop_event.is_set():
+                msg = ("\n导入已停止(已完成部分)")
+            else:
+                msg = (f"\n导入完成: 新增 {len(result['imported'])} 篇"
+                       f" | 已存在跳过 {result['skipped']} 篇"
+                       f" | 覆盖更新 {result['updated']} 篇"
+                       f" | 同名冲突 {len(result['conflicts'])} 篇"
+                       f" | 失败 {len(result['failed'])} 篇")
+            if result["failed"]:
+                msg += "\n失败清单:\n" + "\n".join(f"  - {x}" for x in result["failed"][:10])
+            if result["conflicts"]:
+                msg += ("\n冲突清单(已跳过;可用“另存加后缀”重试):\n"
+                        + "\n".join(f"  - {c}" for c in result["conflicts"][:5]))
+            msg += result.get("css_hint", "")
+            self.root.after(0, self._on_export_finish, msg, kwargs)
+        except Exception as e:
+            logger.error(f"导出异常: {e}", exc_info=True)
+            self.root.after(0, self._on_export_finish, f"\n导出异常终止: {e}", kwargs)
+
+    def _on_export_finish(self, msg, kwargs=None):
+        self._append_log(msg)
+        self.export_running = False
+        self.btn_export.configure(state="normal")
+        self.btn_export_stop.configure(state="disabled")
+        self.btn_start.configure(state="normal")
+        self.btn_ai.configure(state="normal")
+        self.lbl_export_status.configure(text="完成", foreground="green")
+        # 导入完成不主动打开任何窗口:用户直接在 Obsidian 里查看结果
+        messagebox.showinfo("导入到笔记库", msg, parent=self.root)
+
     def _stop(self):
         """优雅停止: 请求后台循环在当前微博处理完后停止(不杀浏览器,干净退出)"""
-        if self.running or self.stats_running:
+        if self.running or self.stats_running or self.export_running:
             self.stop_event.set()
             self.btn_stop.configure(state="disabled")
             self.lbl_status.configure(text="正在停止(当前微博处理完后退出)...",
